@@ -5,7 +5,7 @@
 //   verts4 = xyz + material slot, palette = per-slot {albedo, mtype, rough, ior}.
 // Material types: 0 diffuse, 1 metal (GGX), 2 glass, 3 emissive.
 
-import { parseOBJ, parseGLTF, buildBVHIndexed } from './bvh.js?v=8';
+import { parseOBJ, parseGLTF, buildBVHIndexed } from './bvh.js?v=9';
 
 const SUN_DIR = (() => {
   const l = Math.hypot(-0.45, 0.38, -0.55);
@@ -19,6 +19,31 @@ function dot3(a, b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 function norm3(a) {
   const l = Math.hypot(a[0], a[1], a[2]);
   return [a[0] / l, a[1] / l, a[2] / l];
+}
+
+// fetch with live download progress in the HUD (big models take a while)
+async function fetchBytes(url) {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('无法加载 ' + url + ' (' + res.status + ')');
+  const total = +res.headers.get('Content-Length') || 0;
+  const reader = res.body.getReader();
+  const chunks = [];
+  let recv = 0;
+  const hud = document.getElementById('hud');
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    recv += value.length;
+    const mb = (recv / 1048576).toFixed(1);
+    const tot = total ? ' / ' + (total / 1048576).toFixed(1) + ' MB' : ' MB';
+    if (hud) hud.textContent = `下载模型 ${url.split('/').pop()} — ${mb}${tot} …`;
+    await new Promise((r) => setTimeout(r, 0)); // let the HUD paint
+  }
+  const out = new Uint8Array(recv);
+  let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
 }
 
 function quad(Q, U, V, mtype, tex, alb, rough = 0) {
@@ -201,9 +226,7 @@ const BUNNY_MATERIALS = {
 };
 
 async function buildBunny(matName = 'chrome') {
-  const res = await fetch('models/bunny.obj');
-  if (!res.ok) throw new Error('无法加载 models/bunny.obj (' + res.status + ')');
-  const mesh = parseOBJ(await res.text());
+  const mesh = parseOBJ(new TextDecoder().decode(await fetchBytes('models/bunny.obj')));
 
   const P = mesh.positions;
   let minX = 1e30, minY = 1e30, minZ = 1e30, maxX = -1e30, maxY = -1e30, maxZ = -1e30;
@@ -241,9 +264,7 @@ async function buildBunny(matName = 'chrome') {
 }
 
 async function buildSponza() {
-  const res = await fetch('models/sponza.obj');
-  if (!res.ok) throw new Error('无法加载 models/sponza.obj (' + res.status + ')');
-  const mesh = parseOBJ(await res.text());
+  const mesh = parseOBJ(new TextDecoder().decode(await fetchBytes('models/sponza.obj')));
 
   // normalize: longest horizontal dimension to 34 units, min y at 0
   let minX = 1e30, minY = 1e30, minZ = 1e30, maxX = -1e30, maxY = -1e30, maxZ = -1e30;
@@ -283,14 +304,13 @@ async function buildSponza() {
 }
 
 async function buildBistro() {
-  const res = await fetch('models/bistro.gltf');
-  if (!res.ok) throw new Error('无法加载 models/bistro.gltf (' + res.status + ')');
-  const json = await res.json();
-  const binRes = await fetch('models/bistro.bin');
-  if (!binRes.ok) throw new Error('无法加载 models/bistro.bin (' + binRes.status + ')');
-  const bin = await binRes.arrayBuffer();
+  const json = JSON.parse(new TextDecoder().decode(await fetchBytes('models/bistro.gltf')));
+  const bin = (await fetchBytes('models/bistro.bin')).buffer;
 
   const mesh = parseGLTF(json, bin, { tint: true });
+  const hud = document.getElementById('hud');
+  hud.textContent = '模型下载完成 — 构建 BVH(421 万三角形,页面会冻结十几秒)…';
+  await new Promise((r) => setTimeout(r, 60));
   const bvh = buildBVHIndexed(mesh.positions, mesh.tris, mesh.normals);
   const meshScene = packMeshScene(
     { positions: mesh.positions, normals: bvh.vnorm, idx: bvh.idx, nodes: bvh.nodes,
