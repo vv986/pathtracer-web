@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>GPU 实时路径追踪 — 多场景</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { width: 100vw; height: 100vh; display: block; }
+  #hud {
+    position: fixed; top: 12px; left: 16px; color: #cfd8e3;
+    font: 13px/1.6 Consolas, "Microsoft YaHei", monospace;
+    text-shadow: 0 1px 3px #000; pointer-events: none; white-space: pre;
+  }
+  #ui {
+    position: fixed; top: 12px; right: 16px; display: flex; gap: 8px; align-items: center;
+    font: 13px "Microsoft YaHei", sans-serif;
+  }
+  #ui button {
+    background: rgba(20, 26, 34, 0.75); color: #cfd8e3; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 6px; padding: 6px 14px; cursor: pointer;
+  }
+  #ui button.active { background: rgba(70, 120, 200, 0.85); color: #fff; }
+  #ui select {
+    background: rgba(20, 26, 34, 0.75); color: #cfd8e3; border: 1px solid rgba(255,255,255,0.18);
+    border-radius: 6px; padding: 5px 8px;
+  }
+  #err {
+    position: fixed; left: 16px; bottom: 16px; right: 16px; color: #ff7a7a;
+    font: 12px/1.5 Consolas, monospace; white-space: pre-wrap;
+    text-shadow: 0 1px 3px #000; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="ui">
+  <button data-scene="field">户外场景</button>
+  <button data-scene="bunny">兔子模型</button>
+  <button data-scene="sponza">Sponza</button>
+  <button data-scene="bistro">Bistro</button>
+  <button data-scene="cornell">Cornell Box</button>
+  <select id="matSel" title="兔子材质">
+    <option value="chrome">镜面</option>
+    <option value="gold">金色</option>
+    <option value="glass">玻璃</option>
+    <option value="matte">哑光</option>
+  </select>
+</div>
+<div id="err"></div>
+
+<script type="module" src="app.js?v=8"></script>
+</body>
+</html>

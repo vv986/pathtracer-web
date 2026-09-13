@@ -1,0 +1,4 @@
+# 大模型文件不进仓库加速克隆/部署,下载方式见 README 
+models/sponza.obj 
+models/bistro.bin 
+models/bistro.gltf

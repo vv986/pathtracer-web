@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>GPU 实时路径追踪 — Cornell Box</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { width: 100vw; height: 100vh; display: block; }
+  #hud {
+    position: fixed; top: 12px; left: 16px; color: #cfd8e3;
+    font: 13px/1.6 Consolas, "Microsoft YaHei", monospace;
+    text-shadow: 0 1px 3px #000; pointer-events: none; white-space: pre;
+  }
+  #err {
+    position: fixed; left: 16px; bottom: 16px; right: 16px; color: #ff7a7a;
+    font: 12px/1.5 Consolas, monospace; white-space: pre-wrap;
+    text-shadow: 0 1px 3px #000; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"></div>
+<div id="err"></div>
+
+<script id="wgsl" type="text/wgsl">
+struct Uniforms {
+  dims      : vec4u,   // res.x, res.y, frame, samples this frame
+  cam_pos_f : vec4f,   // camera position xyz, fov_scale = tan(vfov/2)
+  cam_tgt   : vec4f,   // camera target xyz, unused
+  scene_inf : vec4f,   // num_quads, light_index, light_area, unused
+  sphere    : vec4f,   // glass sphere xyz, radius
+};
+
+@group(0) @binding(0) var<uniform> u : Uniforms;
+@group(0) @binding(1) var<storage, read_write> accum : array<vec4f>;
+@group(0) @binding(2) var out_tex : texture_storage_2d<rgba16float, write>;
+@group(0) @binding(3) var<storage, read> quads : array<Quad>;
+
+struct Quad {
+  q  : vec4f,   // origin xyz, material id
+  uu : vec4f,   // edge u
+  vv : vec4f,   // edge v
+  nd : vec4f,   // outward normal xyz, plane distance D
+};
+
+struct Hit {
+  t     : f32,
+  p     : vec3f,
+  n     : vec3f,
+  front : bool,
+  mat   : i32,
+};
+
+const PI = 3.14159265358979;
+const MAX_DEPTH = 12u;
+const LIGHT_ID = 5i;
+const MAX_TOTAL_SAMPLES = 8000u;
+
+// ---- RNG (PCG hash) ----
+
+fn pcg(state: ptr<function, u32>) -> u32 {
+  var s = *state;
+  s = s * 747796405u + 2891336453u;
+  let word = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  *state = s;
+  return (word >> 22u) ^ word;
+}
+
+fn rand(state: ptr<function, u32>) -> f32 {
+  return f32(pcg(state)) * (1.0 / 4294967296.0);
+}
+
+fn hash_seed(x: u32, y: u32, frame: u32) -> u32 {
+  var s = x * 1973u + y * 9277u + frame * 26699u + 1u;
+  pcg(&s);
+  pcg(&s);
+  return s;
+}
+
+// ---- sampling ----
+
+fn cosine_dir(r: ptr<function, u32>) -> vec3f {
+  // Cosine-weighted hemisphere around +z, pdf = cos/pi.
+  let z = sqrt(1.0 - rand(r));
+  let phi = 2.0 * PI * rand(r);
+  let s = sqrt(max(0.0, 1.0 - z * z));
+  return vec3f(s * cos(phi), s * sin(phi), z);
+}
+
+fn onb(w_in: vec3f) -> mat3x3f {
+  let w = normalize(w_in);
+  let a = select(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), abs(w.x) > 0.9);
+  let v = normalize(cross(w, a));
+  let uu = cross(w, v);
+  return mat3x3f(uu, v, w);
+}
+
+// ---- intersection ----
+
+fn hit_quad(qd: Quad, ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -> bool {
+  let n_un = cross(qd.uu.xyz, qd.vv.xyz);
+  let nn = normalize(n_un);
+  let denom = dot(nn, rd);
+  if (abs(denom) < 1e-8) { return false; }
+  let t = (qd.nd.w - dot(nn, ro)) / denom;
+  if (t < tmin || t > tmax) { return false; }
+  let p = ro + rd * t;
+  let pv = p - qd.q.xyz;
+  let w = n_un / dot(n_un, n_un);
+  let alpha = dot(w, cross(pv, qd.vv.xyz));
+  let beta = dot(w, cross(qd.uu.xyz, pv));
+  if (alpha < 0.0 || alpha > 1.0 || beta < 0.0 || beta > 1.0) { return false; }
+  let front = dot(rd, nn) < 0.0;
+  (*h) = Hit(t, p, select(-nn, nn, front), front, i32(qd.q.w));
+  return true;
+}
+
+fn hit_scene(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32,
+             num_quads: u32, h: ptr<function, Hit>) -> bool {
+  var best = tmax;
+  var found = false;
+  var tmp: Hit;
+
+  for (var i = 0u; i < num_quads; i = i + 1u) {
+    if (hit_quad(quads[i], ro, rd, tmin, best, &tmp)) {
+      best = tmp.t;
+      found = true;
+      *h = tmp;
+    }
+  }
+
+  // glass sphere
+  let sc = u.sphere.xyz;
+  let rad = u.sphere.w;
+  let oc = ro - sc;
+  let a = dot(rd, rd);
+  let hb = dot(oc, rd);
+  let c = dot(oc, oc) - rad * rad;
+  let disc = hb * hb - a * c;
+  if (disc > 0.0) {
+    let sq = sqrt(disc);
+    var t = (-hb - sq) / a;
+    if (t < tmin || t > best) {
+      t = (-hb + sq) / a;
+    }
+    if (t >= tmin && t <= best) {
+      let p = ro + rd * t;
+      let n_out = (p - sc) / rad;
+      let front = dot(rd, n_out) < 0.0;
+      *h = Hit(t, p, select(-n_out, n_out, front), front, 4);
+      found = true;
+      best = t;
+    }
+  }
+
+  return found;
+}
+
+// ---- light sampling (uniform area, density over solid angle) ----
+
+fn quad_pdf_value(L: Quad, ro: vec3f, rd: vec3f, area: f32) -> f32 {
+  let n_un = cross(L.uu.xyz, L.vv.xyz);
+  let nn = normalize(n_un);
+  let denom = dot(nn, rd);
+  if (abs(denom) < 1e-8) { return 0.0; }
+  let t = (L.nd.w - dot(nn, ro)) / denom;
+  if (t < 0.001) { return 0.0; }
+  let p = ro + rd * t;
+  let pv = p - L.q.xyz;
+  let w = n_un / dot(n_un, n_un);
+  let alpha = dot(w, cross(pv, L.vv.xyz));
+  let beta = dot(w, cross(L.uu.xyz, pv));
+  if (alpha < 0.0 || alpha > 1.0 || beta < 0.0 || beta > 1.0) { return 0.0; }
+  let d2 = t * t * dot(rd, rd);
+  let cosv = abs(dot(rd, nn)) / length(rd);
+  return d2 / (cosv * area);
+}
+
+fn sample_light_dir(L: Quad, p: vec3f, r: ptr<function, u32>) -> vec3f {
+  let sp = L.q.xyz + rand(r) * L.uu.xyz + rand(r) * L.vv.xyz;
+  return sp - p;
+}
+
+// ---- materials ----
+
+fn albedo_of(m: i32) -> vec3f {
+  if (m == 1i) { return vec3f(0.65, 0.05, 0.05); }  // red wall
+  if (m == 2i) { return vec3f(0.12, 0.45, 0.15); }  // green wall
+  return vec3f(0.73, 0.73, 0.73);                    // white
+}
+
+fn schlick(cosine: f32, ior: f32) -> f32 {
+  var r0 = (1.0 - ior) / (1.0 + ior);
+  r0 = r0 * r0;
+  return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+}
+
+// ---- path tracing ----
+
+fn trace(ro0: vec3f, rd0: vec3f, r: ptr<function, u32>,
+         num_quads: u32, li: u32, area: f32) -> vec3f {
+  var radiance = vec3f(0.0);
+  var throughput = vec3f(1.0);
+  var ro = ro0;
+  var rd = rd0;
+
+  var bounce = 0u;
+  loop {
+    if (bounce >= MAX_DEPTH) { break; }
+    bounce = bounce + 1u;
+
+    var h: Hit;
+    if (!hit_scene(ro, rd, 0.001, 1e30, num_quads, &h)) {
+      break;  // black background
+    }
+
+    // emissive ceiling panel (front face only)
+    if (h.mat == LIGHT_ID) {
+      if (h.front) {
+        radiance = radiance + throughput * vec3f(4.0, 4.0, 4.0);
+      }
+      break;
+    }
+
+    // glass sphere: delta-distribution path (mirror CPU logic)
+    if (h.mat == 4) {
+      let ior = select(1.5, 1.0 / 1.5, h.front);
+      let d = normalize(rd);
+      let ct = min(dot(-d, h.n), 1.0);
+      let st = sqrt(1.0 - ct * ct);
+      var dir: vec3f;
+      let cannot = ior * st > 1.0;
+      if (cannot || schlick(ct, ior) > rand(r)) {
+        dir = reflect(d, h.n);
+      } else {
+        dir = refract(d, h.n, ior);
+      }
+      ro = h.p;
+      rd = dir;
+      continue;
+    }
+
+    // diffuse: mixture importance sampling (50% light, 50% cosine)
+    let alb = albedo_of(h.mat);
+    let L = quads[li];
+    let ldir = sample_light_dir(L, h.p, r);
+    let basis = onb(h.n);
+    let cdir = basis * cosine_dir(r);
+
+    var chosen = ldir;
+    if (rand(r) >= 0.5) { chosen = cdir; }
+    chosen = normalize(chosen);
+
+    let pl = quad_pdf_value(L, h.p, chosen, area);
+    let pc = max(0.0, dot(h.n, chosen)) / PI;
+    let pdf = 0.5 * pl + 0.5 * pc;
+    if (pdf < 1e-8) { break; }
+
+    let scat = max(0.0, dot(h.n, chosen)) / PI;
+    if (scat <= 0.0) { break; }
+
+    throughput = throughput * alb * (scat / pdf);
+    ro = h.p;
+    rd = chosen;
+  }
+
+  return radiance;
+}
+
+// ---- tone mapping ----
+
+fn aces_curve(v: f32) -> f32 {
+  return (v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14);
+}
+
+// ---- main ----
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3u) {
+  let W = u32(u.dims.x);
+  let H = u32(u.dims.y);
+  if (gid.x >= W || gid.y >= H) { return; }
+
+  let idx = gid.y * W + gid.x;
+  let frame = u.dims.z;
+  let spp = u.dims.w;
+
+  var rng = hash_seed(gid.x, gid.y, frame);
+
+  // camera basis
+  let fwd = normalize(u.cam_tgt.xyz - u.cam_pos_f.xyz);
+  let right = normalize(cross(fwd, vec3f(0.0, 1.0, 0.0)));
+  let up = cross(right, fwd);
+  let aspect = f32(W) / f32(H);
+  let tanf = u.cam_pos_f.w;
+
+  var radiance = vec3f(0.0);
+  for (var s = 0u; s < spp; s = s + 1u) {
+    let jitter = vec2f(rand(&rng), rand(&rng)) - vec2f(0.5, 0.5);
+    let uv = (vec2f(f32(gid.x), f32(gid.y)) + vec2f(0.5, 0.5) + jitter) / vec2f(f32(W), f32(H));
+    let ndc = vec2f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let dir = normalize(ndc.x * right * tanf * aspect + ndc.y * up * tanf + fwd);
+    radiance = radiance + trace(u.cam_pos_f.xyz, dir, &rng, u32(u.scene_inf.x), u32(u.scene_inf.y), u.scene_inf.z);
+  }
+
+  let prev = select(accum[idx].rgb, vec3f(0.0), frame == 0u);
+  let total = prev + radiance;
+  accum[idx] = vec4f(total, 1.0);
+
+  let count = f32(frame + 1u) * f32(spp);
+  var c = vec3f(aces_curve(total.r / count), aces_curve(total.g / count), aces_curve(total.b / count));
+  c = pow(c, vec3f(1.0 / 2.2));
+  textureStore(out_tex, vec2i(gid.xy), vec4f(c, 1.0));
+}
+</script>
+
+<script id="wgsl-blit" type="text/wgsl">
+struct VOut { @builtin(position) pos: vec4f };
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  var o: VOut;
+  o.pos = vec4f(p[vi], 0.0, 1.0);
+  return o;
+}
+
+@group(0) @binding(0) var tex : texture_2d<f32>;
+
+@fragment
+fn fs(@builtin(position) fp: vec4f) -> @location(0) vec4f {
+  return textureLoad(tex, vec2i(fp.xy), 0);
+}
+</script>
+
+<script>
+const errBox = document.getElementById('err');
+function showErr(msg) { errBox.textContent = String(msg).slice(0, 4000); }
+window.onerror = (m, s, l, c) => { showErr(`JS error: ${m} (${l}:${c})`); };
+
+// ---------- scene (mirrors the CPU Cornell box) ----------
+
+function cross3(a, b) {
+  return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+}
+function dot3(a, b) { return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function norm3(a) {
+  const l = Math.hypot(a[0], a[1], a[2]);
+  return [a[0]/l, a[1]/l, a[2]/l];
+}
+
+function quadRec(Q, U, V, mat) {
+  const n = cross3(U, V);
+  return { Q, U, V, n: norm3(n), D: dot3(norm3(n), Q), mat };
+}
+
+function addBox(arr, a, b, deg, tr, mat) {
+  // axis-aligned box, rotate_y about origin then translate (same math as CPU)
+  const [x0, y0, z0] = a, [x1, y1, z1] = b;
+  const th = deg * Math.PI / 180, c = Math.cos(th), s = Math.sin(th);
+  const corner = (p) => [c*p[0] + s*p[2], p[1], -s*p[0] + c*p[2]]
+                        .map((v, i) => v + tr[i]);
+  const faces = [
+    [[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]],  // front z+
+    [[x1,y0,z1],[x1,y0,z0],[x1,y1,z0],[x1,y1,z1]],  // right x+
+    [[x1,y0,z0],[x0,y0,z0],[x0,y1,z0],[x1,y1,z0]],  // back z-
+    [[x0,y0,z0],[x0,y0,z1],[x0,y1,z1],[x0,y1,z0]],  // left x-
+    [[x0,y1,z1],[x1,y1,z1],[x1,y1,z0],[x0,y1,z0]],  // top y+
+    [[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]],  // bottom y-
+  ];
+  for (const [c0, c1, c2, c3] of faces) {
+    const q0 = corner(c0), q1 = corner(c1), q3 = corner(c3);
+    arr.push(quadRec(q0,
+                     [q1[0]-q0[0], q1[1]-q0[1], q1[2]-q0[2]],
+                     [q3[0]-q0[0], q3[1]-q0[1], q3[2]-q0[2]],
+                     mat));
+  }
+}
+
+function buildScene() {
+  const quads = [];
+  quads.push(quadRec([200,0,0],   [0,600,0], [0,0,556], 2));  // green wall
+  quads.push(quadRec([900,0,0],   [0,600,0], [0,0,556], 1));  // red wall
+  quads.push(quadRec([200,0,0],   [700,0,0], [0,0,556], 0));  // floor
+  quads.push(quadRec([200,600,0], [700,0,0], [0,0,556], 0));  // ceiling
+  quads.push(quadRec([200,0,556], [700,0,0], [0,600,0], 0));  // back
+  const lightIndex = quads.length;
+  quads.push(quadRec([280,599,130], [340,0,0], [0,0,300], 5)); // light panel
+  addBox(quads, [0,0,0], [260,320,260],  20, [540,0,140], 0);
+  addBox(quads, [0,0,0], [220,220,220], -25, [240,0,280], 0);
+  return quads;
+}
+
+// ---------- GPU setup ----------
+
+const SPP_PER_FRAME = 2;
+const TARGET_CENTER = [550, 300, 250];
+const FOV_SCALE = Math.tan(19 * Math.PI / 180);
+
+const canvas = document.getElementById('c');
+const hud = document.getElementById('hud');
+
+let device, ctx, format;
+let uniBuf, accumBuf, quadBuf, outTex;
+let compPipeline, blitPipeline, compBind, blitBind;
+let W = 0, H = 0, numQuads = 0, lightArea = 0;
+
+const cam = { yaw: Math.PI, pitch: 0.05, dist: 950 };
+
+function clampCam() {
+  // keep the camera inside the room (the front is open, so yaw stays near π)
+  cam.yaw = Math.max(Math.PI - 0.30, Math.min(Math.PI + 0.30, cam.yaw));
+  cam.pitch = Math.max(-0.24, Math.min(0.24, cam.pitch));
+  cam.dist = Math.max(750, Math.min(950, cam.dist));
+}
+let frame = 0, totalSamples = 0;
+let lastT = 0, fpsSmooth = 0, lastTickAt = 0;
+
+function camPos() {
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  const cy = Math.cos(cam.yaw), sy = Math.sin(cam.yaw);
+  return [
+    TARGET_CENTER[0] + cam.dist * cp * sy,
+    TARGET_CENTER[1] + cam.dist * sp,
+    TARGET_CENTER[2] + cam.dist * cp * cy,
+  ];
+}
+
+function desiredSize() {
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  let w = Math.max(320, Math.floor((canvas.clientWidth || window.innerWidth) * dpr));
+  let h = Math.max(240, Math.floor((canvas.clientHeight || window.innerHeight) * dpr));
+  const cap = 1700;
+  if (w > cap) { h = Math.floor(h * cap / w); w = cap; }
+  return [w, h];
+}
+
+function setupBuffers() {
+  [W, H] = desiredSize();
+  canvas.width = W; canvas.height = H;
+
+  accumBuf?.destroy();
+  accumBuf = device.createBuffer({ size: W * H * 16, usage: GPUBufferUsage.STORAGE });
+
+  outTex?.destroy();
+  outTex = device.createTexture({ size: [W, H], format: 'rgba16float',
+    usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING });
+
+  compBind = device.createBindGroup({
+    layout: compPipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniBuf } },
+      { binding: 1, resource: { buffer: accumBuf } },
+      { binding: 2, resource: outTex.createView() },
+      { binding: 3, resource: { buffer: quadBuf } },
+    ],
+  });
+  blitBind = device.createBindGroup({
+    layout: blitPipeline.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: outTex.createView() }],
+  });
+  frame = 0;
+}
+
+async function init() {
+  if (!navigator.gpu) throw new Error('此浏览器不支持 WebGPU,请使用 Chrome / Edge 113+');
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error('未找到可用 GPU 适配器');
+  device = await adapter.requestDevice();
+  device.addEventListener('uncapturederror', (e) => showErr('GPU error: ' + e.error.message));
+
+  ctx = canvas.getContext('webgpu');
+  format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'opaque' });
+
+  // uniforms (80 bytes)
+  uniBuf = device.createBuffer({ size: 80, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+  // quads storage buffer
+  const quads = buildScene();
+  numQuads = quads.length;
+  const fq = new Float32Array(numQuads * 16);
+  quads.forEach((q, i) => {
+    const o = i * 16;
+    fq.set([q.Q[0], q.Q[1], q.Q[2], q.mat], o);
+    fq.set([q.U[0], q.U[1], q.U[2], 0], o + 4);
+    fq.set([q.V[0], q.V[1], q.V[2], 0], o + 8);
+    fq.set([q.n[0], q.n[1], q.n[2], q.D], o + 12);
+  });
+  quadBuf = device.createBuffer({ size: fq.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  device.queue.writeBuffer(quadBuf, 0, fq);
+  const L = quads[5];
+  lightArea = Math.hypot(...cross3(L.U, L.V));
+
+  // pipelines
+  const compModule = device.createShaderModule({ code: document.getElementById('wgsl').textContent });
+  compPipeline = device.createComputePipeline({
+    layout: 'auto',
+    compute: { module: compModule, entryPoint: 'main' },
+  });
+  const blitModule = device.createShaderModule({ code: document.getElementById('wgsl-blit').textContent });
+  blitPipeline = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: blitModule, entryPoint: 'vs' },
+    fragment: { module: blitModule, entryPoint: 'fs',
+                targets: [{ format }] },
+    primitive: { topology: 'triangle-list' },
+  });
+
+  setupBuffers();
+  requestAnimationFrame(tick);
+}
+
+function tick(t) {
+  lastTickAt = performance.now();
+  const dt = lastT ? (t - lastT) / 1000 : 0;
+  lastT = t;
+  fpsSmooth = fpsSmooth * 0.9 + (dt > 0 ? 1 / dt : 0) * 0.1;
+
+  // rebuild buffers if the canvas layout size changed
+  const [tw, th] = desiredSize();
+  if (tw !== W || th !== H) setupBuffers();
+
+  const pos = camPos();
+  const ubo = new ArrayBuffer(80);
+  const u32 = new Uint32Array(ubo, 0, 4);
+  const f32 = new Float32Array(ubo);
+  u32.set([W, H, frame, SPP_PER_FRAME]);
+  f32.set([pos[0], pos[1], pos[2], FOV_SCALE], 4);
+  f32.set(TARGET_CENTER, 8);
+  f32.set([numQuads, 5, lightArea, 0], 12);
+  f32.set([280, 70, 80, 70], 16);  // glass sphere
+  device.queue.writeBuffer(uniBuf, 0, ubo);
+
+  const enc = device.createCommandEncoder();
+  if (totalSamples < 4000) {
+    const cp = enc.beginComputePass();
+    cp.setPipeline(compPipeline);
+    cp.setBindGroup(0, compBind);
+    cp.dispatchWorkgroups(Math.ceil(W / 8), Math.ceil(H / 8));
+    cp.end();
+    frame++;
+    totalSamples += SPP_PER_FRAME;
+  }
+  const rp = enc.beginRenderPass({
+    colorAttachments: [{
+      view: ctx.getCurrentTexture().createView(),
+      loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 },
+    }],
+  });
+  rp.setPipeline(blitPipeline);
+  rp.setBindGroup(0, blitBind);
+  rp.draw(3);
+  rp.end();
+  device.queue.submit([enc.finish()]);
+
+  const stat = totalSamples >= 4000
+    ? `已收敛 · ${totalSamples} spp`
+    : `累积 ${totalSamples} spp · ${fpsSmooth.toFixed(0)} fps`;
+  hud.textContent =
+    `WebGPU 实时路径追踪 — Cornell Box\n` +
+    `${W}×${H} · ${stat}`;
+
+  requestAnimationFrame(tick);
+}
+
+// Watchdog: in occluded/automation contexts rAF may never fire; keep rendering anyway.
+setInterval(() => {
+  if (device && performance.now() - lastTickAt > 400) tick(performance.now());
+}, 120);
+
+// ---------- interaction ----------
+
+let dragging = false, px = 0, py = 0;
+canvas.addEventListener('pointerdown', (e) => { dragging = true; px = e.clientX; py = e.clientY; });
+window.addEventListener('pointerup', () => { dragging = false; });
+window.addEventListener('pointermove', (e) => {
+  if (!dragging) return;
+  cam.yaw -= (e.clientX - px) * 0.003;
+  cam.pitch += (e.clientY - py) * 0.003;
+  clampCam();
+  px = e.clientX; py = e.clientY;
+  frame = 0; totalSamples = 0;
+});
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  cam.dist *= Math.exp(e.deltaY * 0.001);
+  clampCam();
+  frame = 0; totalSamples = 0;
+}, { passive: false });
+window.addEventListener('resize', () => { if (device) setupBuffers(); });
+
+init().catch(showErr);
+</script>
+</body>
+</html>
