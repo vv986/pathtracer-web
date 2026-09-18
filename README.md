@@ -56,6 +56,8 @@ python -m http.server 8765
   变换、实例展开、specGlossiness 材质)、**分箱 SAH BVH**(表面积启发式,遍历成本较中位数
   切分低 20~40%,175 万三角形秒级构建)
 - `scenes.js` — 五个场景的几何打包
+- `tools/build_atlas.py` — Bistro 贴图图集构建器:156 张 DDS 漫反射贴图(Pillow 解码 DX10)→
+  分级缩放(头部 512²/其余 128²)→ shelf 装箱进 2 页 2048² JPEG + 材质→图块 UV 映射表
 - `app.js` — 管线/绑定组管理、轨道相机、渐进式累积、场景切换、设备上限协商、rAF 看门狗、错误面板
 
 ## 踩过的坑(记录供参考)
