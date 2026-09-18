@@ -1,9 +1,0 @@
-evice, format, alphaMode: 'opaque' });
-  INIT_DPR = Math.min(window.devicePixelRatio || 1, 1.5);
-
-  uniBuf = device.createBuffer({ size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
-  dummyBuf = device.createBuffer({ size: 128, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-
-  const primModule = await makeModule(CORE1 + PRIM_STUB + CORE2, 'prim');
-  const meshModule = await makeModule(CORE1 + MESH_PART + CORE2, 'mesh');
-  const blitModul
