@@ -463,6 +463,13 @@ fn trace(ro0: vec3f, rd0: vec3f, rng: ptr<function, u32>) -> vec3f {
     if (bounce >= max(u32(u.light_inf.w), 1u)) { break; }
     bounce = bounce + 1u;
 
+    // Russian roulette: terminate low-throughput paths early (unbiased)
+    if (bounce > 3u) {
+      let p_survive = clamp(max(tp.r, max(tp.g, tp.b)), 0.05, 0.95);
+      if (rand(rng) > p_survive) { break; }
+      tp = tp / p_survive;
+    }
+
     var h: Hit;
     if (!scene_hit(ro, rd, 0.001, 1e30, &h)) {
       if (u.light_inf.y > 0.5) {
@@ -576,7 +583,8 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
     let uv = (vec2f(f32(gid.x), f32(gid.y)) + vec2f(0.5, 0.5) + jitter) / vec2f(f32(W), f32(H));
     let ndc = vec2f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     let dir = normalize(ndc.x * right * tanf * aspect + ndc.y * up * tanf + fwd);
-    radiance = radiance + trace(u.cam_pos_f.xyz, dir, &rng);
+    // firefly clamp: cap each sample so rare bright specular spikes don't sparkle
+    radiance = radiance + min(trace(u.cam_pos_f.xyz, dir, &rng), vec3f(20.0));
   }
 
   let prev = select(accum[idx].rgb, vec3f(0.0), frame == 0u);

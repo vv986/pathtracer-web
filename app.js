@@ -1,7 +1,7 @@
 // GPU orchestration: pipelines, per-scene buffers, camera, UI, frame loop.
 
-import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=9';
-import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=9';
+import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=10';
+import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=10';
 
 const errBox = document.getElementById('err');
 function showErr(msg) {
@@ -30,6 +30,8 @@ let meshMatName = 'chrome';
 let frame = 0, totalSamples = 0;
 let lastT = 0, tickCount = 0, fpsTimer = 0, fps = 0;
 let lastTickAt = 0;
+let captureFlag = false;
+let building = false;
 let INIT_DPR = 1; // frozen at init: a flapping devicePixelRatio would reset accumulation every frame
 
 // adaptive resolution governor: keeps heavy scenes at ~30 fps by scaling the
@@ -126,6 +128,8 @@ function buildBindGroup(rt) {
 // ---- scene lifecycle ----
 
 async function activateScene(name) {
+  if (building) return;
+  building = true;
   const buildStart = performance.now();
   hud.textContent = `构建场景 ${name} …(大场景 BVH 构建可能需要十几秒)`;
   await new Promise((r) => setTimeout(r, 30)); // let the HUD paint
@@ -165,6 +169,7 @@ async function activateScene(name) {
   if (scene.def.numTris > 0) {
     hud.textContent = `${scene.def.name} — ${scene.def.numTris.toLocaleString()} 三角形,BVH 就绪 (${buildMs}s)`;
   }
+  building = false;
 }
 
 // ---- frame loop ----
@@ -241,6 +246,24 @@ function tick(t) {
   rp.draw(3);
   rp.end();
   device.queue.submit([enc.finish()]);
+
+  // screenshot: capture the just-presented frame synchronously, save as PNG
+  if (captureFlag && scene) {
+    captureFlag = false;
+    try {
+      const c2 = document.createElement('canvas');
+      c2.width = W; c2.height = H;
+      c2.getContext('2d').drawImage(canvas, 0, 0);
+      c2.toBlob((b) => {
+        if (!b) return;
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(b);
+        a.download = `pathtracer-${scene.def.name}-${totalSamples}spp.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+      }, 'image/png');
+    } catch (e) { showErr('截图失败: ' + String(e)); }
+  }
 
   const stat = totalSamples >= MAX_TOTAL_SAMPLES
     ? `已收敛 · ${totalSamples} spp`
@@ -321,9 +344,20 @@ canvas.addEventListener('wheel', (e) => {
 
 document.querySelectorAll('#ui button[data-scene]').forEach((b) => {
   b.addEventListener('click', async () => {
-    try { await activateScene(b.dataset.scene); } catch (e) { showErr(String(e)); }
+    try { await activateScene(b.dataset.scene); } catch (e) { showErr(String(e)); building = false; }
   });
 });
+// keyboard shortcuts: 1-5 switch scenes
+const KEY_SCENES = { 1: 'field', 2: 'bunny', 3: 'sponza', 4: 'bistro', 5: 'cornell' };
+window.addEventListener('keydown', (e) => {
+  const name = KEY_SCENES[e.key];
+  if (name) {
+    const btn = document.querySelector(`button[data-scene="${name}"]`);
+    if (btn) btn.click();
+  }
+});
+document.getElementById('shotBtn').addEventListener('click', () => { captureFlag = true; });
+window.addEventListener('keydown', (e) => { if (e.key === 'p' || e.key === 'P') captureFlag = true; });
 const matSel = document.getElementById('matSel');
 if (matSel) {
   matSel.addEventListener('change', () => {

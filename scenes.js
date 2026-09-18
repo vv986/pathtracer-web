@@ -5,7 +5,7 @@
 //   verts4 = xyz + material slot, palette = per-slot {albedo, mtype, rough, ior}.
 // Material types: 0 diffuse, 1 metal (GGX), 2 glass, 3 emissive.
 
-import { parseOBJ, parseGLTF, buildBVHIndexed } from './bvh.js?v=9';
+import { parseOBJ, parseGLTF, buildBVHIndexed } from './bvh.js?v=10';
 
 const SUN_DIR = (() => {
   const l = Math.hypot(-0.45, 0.38, -0.55);
