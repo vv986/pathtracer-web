@@ -338,6 +338,7 @@ async function init() {
     maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage,
   } });
   device.addEventListener('uncapturederror', (e) => showErr('GPU error: ' + e.error.message + '\n' + (e.error.reason || '')));
+  device.lost.then((info) => showErr('GPU 设备丢失(' + (info.reason || 'unknown') + '),请刷新页面恢复。'));
 
   ctx = canvas.getContext('webgpu');
   format = navigator.gpu.getPreferredCanvasFormat();
