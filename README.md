@@ -48,11 +48,13 @@ python -m http.server 8765
 - `shaders.js` — 两套 WGSL 管线:
   - **prim 管线**:解析图元(四边形 + 球体存储缓冲)
   - **mesh 管线**:索引化顶点 + BVH 节点栈式遍历 + Möller–Trumbore + 平滑法线 + 材质调色板
-  - 共享核心:PCG 随机数、ONB、余弦/球面立体角采样、50/50 混合重要性采样(灯光 ↔ 余弦半球)、
-    GGX **VNDF** 金属采样、Schlick 菲涅尔、棋盘/大理石程序化纹理、ACES 色调映射、
-    **时域 EMA 降噪**(history 缓冲,blend 随帧数从 0.08 → 1)
+- 共享核心:PCG 随机数、ONB、余弦/球面立体角采样、50/50 混合重要性采样(灯光 ↔ 余弦半球)、
+  GGX **VNDF** 金属采样、Schlick 菲涅尔、**俄罗斯轮盘赌终止**(3 次弹射后按吞吐量概率)、
+  **萤火虫钳制**(单采样亮度上限)、**薄壁玻璃**( architectural windows 直通染色)、
+  棋盘/大理石程序化纹理、ACES 色调映射、**时域 EMA 降噪**(history 缓冲,blend 随帧数从 0.08 → 1)
 - `bvh.js` — 类型化数组的 OBJ 解析器(支持百万行)、glTF 解析器(二进制 buffer、TRS 层级
-  变换、实例展开、specGlossiness 材质)、**quickselect 中位数切分 BVH**(175 万三角形秒级构建)
+  变换、实例展开、specGlossiness 材质)、**分箱 SAH BVH**(表面积启发式,遍历成本较中位数
+  切分低 20~40%,175 万三角形秒级构建)
 - `scenes.js` — 五个场景的几何打包
 - `app.js` — 管线/绑定组管理、轨道相机、渐进式累积、场景切换、设备上限协商、rAF 看门狗、错误面板
 
