@@ -1,7 +1,7 @@
 // GPU orchestration: pipelines, per-scene buffers, camera, UI, frame loop.
 
-import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=11';
-import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=11';
+import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=12';
+import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=12';
 
 const errBox = document.getElementById('err');
 function showErr(msg) {
@@ -197,10 +197,14 @@ function tick(t) {
     }
   }
 
-  let [tw, th] = desiredSize();
-  const rs = (scene ? (scene.def.resScale ?? 1) : 1) * dynScale;
-  tw = Math.max(320, Math.floor(tw * rs));
-  th = Math.max(240, Math.floor(th * rs));
+  let [bw, bh] = desiredSize();
+  // scale the internal resolution while PRESERVING the window's aspect ratio —
+  // independent per-axis clamps here were causing horizontal stretching
+  let s = (scene ? (scene.def.resScale ?? 1) : 1) * dynScale;
+  s = Math.max(s, 320 / bw, 240 / bh); // floor: keep the render at least ~320 wide, proportionally
+  let tw = Math.round(bw * s), th = Math.round(bh * s);
+  const cap = 1700;
+  if (tw > cap) { th = Math.round(th * cap / tw); tw = cap; } // proportional
   if (Math.abs(tw - W) > 2 || Math.abs(th - H) > 2) {
     createFrameBuffers(tw, th);
     frame = 0;
