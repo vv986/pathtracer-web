@@ -48,6 +48,12 @@
   </select>
   <div style="width:1px;height:22px;background:rgba(255,255,255,0.2);margin:0 2px;"></div>
   <button id="shotBtn" title="保存当前画面为 PNG (快捷键 P)">📷 截图</button>
+  <div style="display:flex;flex-direction:column;gap:2px;margin-left:4px;">
+    <label style="color:#cfd8e3;font-size:11px;">☀ 高度 <span id="sunVal">23°</span></label>
+    <input type="range" id="sunEl" min="8" max="75" value="23" style="width:110px;">
+    <label style="color:#cfd8e3;font-size:11px;">曝 光 <span id="expVal">90%</span></label>
+    <input type="range" id="expSl" min="25" max="220" value="90" style="width:110px;">
+  </div>
 </div>
 <div id="err"></div>
 

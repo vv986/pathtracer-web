@@ -390,6 +390,32 @@ window.addEventListener('keydown', (e) => {
   }
 });
 document.getElementById('shotBtn').addEventListener('click', () => { captureFlag = true; });
+
+// sun elevation + exposure sliders (live: sun sphere rewritten in the spheres buffer)
+const sunEl = document.getElementById('sunEl');
+const expSl = document.getElementById('expSl');
+function applySunElevation(deg) {
+  if (!scene) return;
+  const el = deg * Math.PI / 180;
+  const az = scene.def.sunAzimuth !== undefined ? scene.def.sunAzimuth : Math.atan2(-0.45, -0.55);
+  const dir = [Math.cos(el) * Math.sin(az), Math.sin(el), Math.cos(el) * Math.cos(az)];
+  scene.def.sunDir = dir;
+  const si = scene.def.lightSphereIdx;
+  if (si >= 0 && scene.buffers.sphereBuf) {
+    const c = dir.map((d) => d * 8000);
+    const f = new Float32Array([c[0], c[1], c[2], 600]);
+    device.queue.writeBuffer(scene.buffers.sphereBuf, si * 48, f);
+  }
+  frame = 0; totalSamples = 0;
+}
+sunEl.addEventListener('input', () => {
+  document.getElementById('sunVal').textContent = sunEl.value + '°';
+  if (cam) applySunElevation(+sunEl.value);
+});
+expSl.addEventListener('input', () => {
+  document.getElementById('expVal').textContent = expSl.value + '%';
+  if (scene) { scene.def.exposure = expSl.value / 100; }
+});
 window.addEventListener('keydown', (e) => { if (e.key === 'p' || e.key === 'P') captureFlag = true; });
 const matSel = document.getElementById('matSel');
 if (matSel) {
