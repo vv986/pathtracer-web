@@ -131,6 +131,15 @@ function buildBindGroup(rt) {
       { binding: 37, resource: rt.buffers.atlasViews[7] },
       { binding: 38, resource: rt.buffers.sampler },
       { binding: 15, resource: { buffer: rt.buffers.matUVBuf } },
+      { binding: 16, resource: { buffer: rt.buffers.tanBuf } },
+      { binding: 40, resource: rt.buffers.nrmViews[0] },
+      { binding: 41, resource: rt.buffers.nrmViews[1] },
+      { binding: 42, resource: rt.buffers.nrmViews[2] },
+      { binding: 43, resource: rt.buffers.nrmViews[3] },
+      { binding: 44, resource: rt.buffers.nrmViews[4] },
+      { binding: 45, resource: rt.buffers.nrmViews[5] },
+      { binding: 46, resource: rt.buffers.nrmViews[6] },
+      { binding: 47, resource: rt.buffers.nrmViews[7] },
     );
   }
   const layout = rt.def.type === 'mesh' ? meshPipeline.getBindGroupLayout(0) : primPipeline.getBindGroupLayout(0);
@@ -162,8 +171,9 @@ async function activateScene(name) {
       rt.buffers.palAlbBuf = makeStorageF32(m.palAlb);
       rt.buffers.palPrmBuf = makeStorageF32(m.palPrm);
       rt.buffers.texBuf = makeStorageF32(m.tex4);
+      rt.buffers.tanBuf = makeStorageF32(m.tan4);
       // atlas pages (graceful fallback to flat gray when a model ships without textures)
-      rt.buffers.matUVBuf = makeStorageF32(def.atlas ? def.atlas.matUV : new Float32Array(16));
+      rt.buffers.matUVBuf = makeStorageF32(def.atlas ? def.atlas.matUV : new Float32Array(48));
       const views = [];
       if (def.atlas) {
         for (const b of def.atlas.bitmaps) {
@@ -174,6 +184,16 @@ async function activateScene(name) {
       }
       while (views.length < 8) views.push(fallbackView);
       rt.buffers.atlasViews = views;
+      const nrmViews = [];
+      if (def.atlas && def.atlas.nrmBitmaps) {
+        for (const b of def.atlas.nrmBitmaps) {
+          const tex = device.createTexture({ size: [b.width, b.height], format: 'rgba8unorm', usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT });
+          device.queue.copyExternalImageToTexture({ source: b }, { texture: tex }, [b.width, b.height]);
+          nrmViews.push(tex.createView());
+        }
+      }
+      while (nrmViews.length < 8) nrmViews.push(fallbackView);
+      rt.buffers.nrmViews = nrmViews;
       rt.buffers.sampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     }
     sceneCache[name] = rt;

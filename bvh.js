@@ -19,6 +19,11 @@ class F32 {
     this.a[this.n] = x; this.a[this.n + 1] = y;
     this.n += 2;
   }
+  push4(x, y, z, w) {
+    if (this.n + 4 > this.a.length) this.grow(this.n + 4);
+    this.a[this.n] = x; this.a[this.n + 1] = y; this.a[this.n + 2] = z; this.a[this.n + 3] = w;
+    this.n += 4;
+  }
   grow(need) {
     let cap = this.a.length * 2 || 4096;
     while (cap < need) cap *= 2;
@@ -225,6 +230,7 @@ export function parseGLTF(json, bin, opts = {}) {
   const verts = new F32(1 << 22);
   const norms = new F32(1 << 22);
   const tuvs = new F32(1 << 21);   // 2 floats per vertex
+  const tans = new F32(1 << 22);   // 4 floats per vertex (tangent xyz + sign)
   const tris = new U32(1 << 23);
   const matSlot = new U32(1 << 22); // per-vertex material index (exact: each glTF primitive owns its vertices)
   let numVerts = 0;
@@ -242,6 +248,7 @@ export function parseGLTF(json, bin, opts = {}) {
       const base = numVerts;
       const vcount = P.length / 3;
       const T = prim.attributes.TEXCOORD_0 !== undefined ? readAccessor(prim.attributes.TEXCOORD_0) : null;
+      const TG = prim.attributes.TANGENT !== undefined ? readAccessor(prim.attributes.TANGENT) : null;
       for (let i = 0; i < vcount; i++) {
         const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
         const wx = m[0] * x + m[4] * y + m[8] * z + m[12];
@@ -252,6 +259,15 @@ export function parseGLTF(json, bin, opts = {}) {
           tuvs.push2(T[i * 2], T[i * 2 + 1]);
         } else {
           tuvs.push2(0, 0);
+        }
+        if (TG) {
+          let tx = m[0] * TG[i * 4] + m[4] * TG[i * 4 + 1] + m[8] * TG[i * 4 + 2];
+          let ty = m[1] * TG[i * 4] + m[5] * TG[i * 4 + 1] + m[9] * TG[i * 4 + 2];
+          let tz = m[2] * TG[i * 4] + m[6] * TG[i * 4 + 1] + m[10] * TG[i * 4 + 2];
+          const tl = Math.hypot(tx, ty, tz) || 1;
+          tans.push4(tx / tl, ty / tl, tz / tl, TG[i * 4 + 3]);
+        } else {
+          tans.push4(0, 0, 0, 0);
         }
         if (N) {
           const nx = N[i * 3], ny = N[i * 3 + 1], nz = N[i * 3 + 2];
@@ -284,6 +300,7 @@ export function parseGLTF(json, bin, opts = {}) {
     positions: verts.view(),
     normals: norms.view(),
     tuvs: tuvs.view(),
+    tans: tans.view(),
     tris: tris.view(),
     matSlot: matSlotOut,
     mats,

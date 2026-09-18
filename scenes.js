@@ -87,13 +87,17 @@ function addBox(arr, a, b, deg, tr, mtype, tex, alb, rough) {
 
 // pack mesh scene from BVH output + palette; matSlotPerVert: Uint32Array or null (=0)
 function packMeshScene(mesh, palette) {
-  const { positions, normals, tuvs, tris } = mesh;
+  const { positions, normals, tuvs, tans, tris } = mesh;
   const numVerts = normals.length / 3;
   const verts4 = new Float32Array(numVerts * 4);
   // normals MUST be padded to a 16-byte stride too: the shader reads array<vec4f>,
   // and an unpadded 3-float buffer desyncs every vertex past the first third
   const norms4 = new Float32Array(numVerts * 4);
   const tex4 = new Float32Array(numVerts * 4);
+  const tan4 = new Float32Array(numVerts * 4);
+  if (tans) {
+    tan4.set(tans.subarray(0, numVerts * 4));
+  }
   for (let i = 0; i < numVerts; i++) {
     verts4[i * 4] = positions[i * 3];
     verts4[i * 4 + 1] = positions[i * 3 + 1];
@@ -113,7 +117,7 @@ function packMeshScene(mesh, palette) {
     palAlb.set([m.albedo[0], m.albedo[1], m.albedo[2], m.mtype], i * 4);
     palPrm.set([m.rough, m.ior, 0, 0], i * 4);
   });
-  return { verts4, vnorm: norms4, tex4, idx: mesh.idx, nodes: mesh.nodes, numTris: mesh.numTris, palAlb, palPrm };
+  return { verts4, vnorm: norms4, tex4, tan4, idx: mesh.idx, nodes: mesh.nodes, numTris: mesh.numTris, palAlb, palPrm };
 }
 
 // ---------------- Cornell Box ----------------
@@ -317,20 +321,22 @@ async function buildBistro() {
   try {
     const texJson = JSON.parse(new TextDecoder().decode(await fetchBytes('models/bistro_tex.json')));
     const bitmaps = [];
+    const nrmBitmaps = [];
     for (let i = 0; i < texJson.pages; i++) {
       const bytes = await fetchBytes('models/atlas_' + i + '.jpg');
       bitmaps.push(await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
     }
-    const M = mesh.mats.length;
-    const matUV = new Float32Array(M * 8);
-    for (let mi = 0; mi < M; mi++) {
-      const s = texJson.slots[String(mi)];
-      if (s) {
-        matUV.set([s[0], s[1], s[2], s[3]], mi * 8);
-        matUV.set([s[4], s[5], 0, 0], mi * 8 + 4);
-      }
+    for (let i = 0; i < (texJson.nrmPages || 0); i++) {
+      const bytes = await fetchBytes('models/nrm_' + i + '.jpg');
+      nrmBitmaps.push(await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
     }
-    atlas = { bitmaps, matUV };
+    const M = mesh.mats.length;
+    const matUV = new Float32Array(M * 12);
+    for (let mi = 0; mi < M; mi++) {
+      const e = texJson.slots[String(mi)];
+      if (e) matUV.set(e.slice(0, 12), mi * 12);
+    }
+    atlas = { bitmaps, nrmBitmaps, matUV };
   } catch (e) {
     console.warn('atlas unavailable, falling back to flat colors:', String(e).slice(0, 100));
   }

@@ -36,6 +36,23 @@ meshes = g['meshes']
 nodes = g['nodes']
 
 
+def resolve_nrm_uri(mat):
+    nt = mat.get('normalTexture')
+    if nt is None:
+        return None
+    ti = nt.get('index')
+    if ti is None:
+        return None
+    src = texs[ti].get('source')
+    if src is None:
+        return None
+    uri = imgs[src]['uri']
+    for cand in (uri, os.path.splitext(uri)[0] + '.dds'):
+        if os.path.exists(cand):
+            return cand
+    return None
+
+
 def resolve_diff_uri(mat):
     ext = mat.get('extensions', {}).get('KHR_materials_pbrSpecularGlossiness', {})
     dt = ext.get('diffuseTexture')
@@ -248,11 +265,54 @@ for k, (u, tw, th) in enumerate(items):
         print(f'  packed {k + 1}/{len(items)}')
 
 # ---- 输出 ----
+# normal-map atlas (decoded tangent-space normals in RGB)
+nrm_pages = []
+
+
+def new_nrm_page():
+    p = {'img': Image.new('RGB', (PAGE, PAGE), (128, 128, 255)), 'x': 0, 'y': 0, 'rowh': 0}
+    nrm_pages.append(p)
+    return p
+
+
+nrm_placed = {}
+nrm_cur = new_nrm_page()
+for mi, (u, _) in sorted(mat_area.items(), key=lambda kv: -info[kv[1][0]][0] * info[kv[1][0]][1]):
+    nrm_uri = resolve_nrm_uri(mats[mi])
+    if nrm_uri is None:
+        continue
+    if nrm_cur['x'] + 128 > PAGE:
+        nrm_cur['y'] += 128
+        nrm_cur['x'] = 0
+    if nrm_cur['y'] + 128 > PAGE:
+        nrm_cur = new_nrm_page()
+    im = Image.open(nrm_uri).convert('RGB')
+    if im.size != (128, 128):
+        im = im.resize((128, 128), Image.LANCZOS)
+    nrm_cur['img'].paste(im, (nrm_cur['x'], nrm_cur['y']))
+    nrm_placed[u] = (len(nrm_pages) - 1, nrm_cur['x'], nrm_cur['y'])
+    nrm_cur['x'] += 128
+
 slots = {}
 for mi, (u, _) in mat_area.items():
     if u in placed:
         pg, x, y, w, h = placed[u]
         slots[str(mi)] = [x / PAGE, y / PAGE, w / PAGE, h / PAGE, pg, 1]
+
+# extend slots with normal-map tiles (stride 3 vec4)
+for mi in range(len(mats)):
+    e = slots.get(str(mi))
+    if e is None:
+        slots[str(mi)] = [0.0] * 12
+        continue
+    while len(e) < 6:
+        e.append(0)
+    nu = resolve_nrm_uri(mats[mi])
+    if nu and nu in nrm_placed:
+        pg, x, y = nrm_placed[nu]
+        e += [x / PAGE, y / PAGE, 128 / PAGE, 128 / PAGE, pg, 1]
+    else:
+        e += [0.0, 0.0, 0.0, 0.0, 0, 0]
 
 os.makedirs(OUT, exist_ok=True)
 with open(os.path.join(OUT, 'bistro_tex.json'), 'w') as f:
@@ -260,4 +320,7 @@ with open(os.path.join(OUT, 'bistro_tex.json'), 'w') as f:
 for i, p in enumerate(pages):
     p['img'].save(os.path.join(OUT, f'atlas_{i}.jpg'), quality=90)
     print(f'atlas_{i}.jpg saved ({os.path.getsize(os.path.join(OUT, f"atlas_{i}.jpg")) // 1024} KB)')
-print(f'DONE: {len(pages)} pages, {len(placed)}/{len(tex_area)} textures placed')
+for i, p in enumerate(nrm_pages):
+    p['img'].save(os.path.join(OUT, f'nrm_{i}.jpg'), quality=92)
+    print(f'nrm_{i}.jpg saved')
+print(f'DONE: {len(pages)} albedo pages, {len(nrm_pages)} normal pages, {len(placed)}/{len(tex_area)} textures placed')

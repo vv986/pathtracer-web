@@ -325,7 +325,16 @@ struct BVHNode {
 @group(0) @binding(36) var atlas6 : texture_2d<f32>;
 @group(0) @binding(37) var atlas7 : texture_2d<f32>;
 @group(0) @binding(38) var texSamp : sampler;
-@group(0) @binding(15) var<storage, read> matUVs : array<vec4f>;  // 2 per material: [u0,v0,su,sv] [page,hasTex,0,0]
+@group(0) @binding(15) var<storage, read> matUVs : array<vec4f>;  // 3 per material: [au0,av0,asu,asv] [pgA,hasAlb,nu0,nv0] [nsu,nsv,pgN,hasNrm]
+@group(0) @binding(16) var<storage, read> tans : array<vec4f>;    // per-vertex tangent xyz + handedness
+@group(0) @binding(40) var nrm0 : texture_2d<f32>;
+@group(0) @binding(41) var nrm1 : texture_2d<f32>;
+@group(0) @binding(42) var nrm2 : texture_2d<f32>;
+@group(0) @binding(43) var nrm3 : texture_2d<f32>;
+@group(0) @binding(44) var nrm4 : texture_2d<f32>;
+@group(0) @binding(45) var nrm5 : texture_2d<f32>;
+@group(0) @binding(46) var nrm6 : texture_2d<f32>;
+@group(0) @binding(47) var nrm7 : texture_2d<f32>;
 
 fn aabb_hit(bmin: vec3f, bmax: vec3f, ro: vec3f, inv: vec3f, tmax: f32) -> bool {
   let t0 = (bmin - ro) * inv;
@@ -390,7 +399,25 @@ fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -
         let t1 = tuvs[i1].xy;
         let t2 = tuvs[i2].xy;
         let uv_s = (1.0 - uu - wv) * t0 + uu * t1 + wv * t2;
-        (*h) = Hit(t, ro + rd * t, select(n_g, n_s, true), front, mat, uv_s, i32(ms));
+
+        // normal mapping: TBN perturbation when the material slot has a normal tile
+        let e1m = matUVs[ms * 3u + 1u];
+        let e2m = matUVs[ms * 3u + 2u];
+        var n_sh = n_s;
+        if (e2m.w > 0.5) {
+          let g0 = tans[i0];
+          let g1 = tans[i1];
+          let g2 = tans[i2];
+          var t_t = (1.0 - uu - wv) * g0.xyz + uu * g1.xyz + wv * g2.xyz;
+          let t_w = (1.0 - uu - wv) * g0.w + uu * g1.w + wv * g2.w;
+          t_t = normalize(t_t - n_s * dot(n_s, t_t));
+          let b_t = cross(n_s, t_t) * t_w;
+          let uv_n = vec2f(e1m.z + uv_s.x * e2m.x, e1m.w + uv_s.y * e2m.y);
+          let tn = nrm_sample(u32(e2m.z), uv_n) * 2.0 - vec3f(1.0);
+          n_sh = normalize(t_t * tn.x + b_t * tn.y + n_s * tn.z);
+        }
+
+        (*h) = Hit(t, ro + rd * t, select(n_g, n_sh, true), front, mat, uv_s, i32(ms));
         found = true;
         best = t;
       }
@@ -431,15 +458,27 @@ fn atlas_sample(page: u32, uv: vec2f) -> vec3f {
   return vec3f(0.0);
 }
 
+fn nrm_sample(page: u32, uv: vec2f) -> vec3f {
+  if (page == 0u) { return textureSampleLevel(nrm0, texSamp, uv, 0.0).xyz; }
+  if (page == 1u) { return textureSampleLevel(nrm1, texSamp, uv, 0.0).xyz; }
+  if (page == 2u) { return textureSampleLevel(nrm2, texSamp, uv, 0.0).xyz; }
+  if (page == 3u) { return textureSampleLevel(nrm3, texSamp, uv, 0.0).xyz; }
+  if (page == 4u) { return textureSampleLevel(nrm4, texSamp, uv, 0.0).xyz; }
+  if (page == 5u) { return textureSampleLevel(nrm5, texSamp, uv, 0.0).xyz; }
+  if (page == 6u) { return textureSampleLevel(nrm6, texSamp, uv, 0.0).xyz; }
+  if (page == 7u) { return textureSampleLevel(nrm7, texSamp, uv, 0.0).xyz; }
+  return vec3f(0.0, 0.0, 1.0);
+}
+
 fn sample_albedo(h: Hit) -> vec3f {
   // procedural base color, multiplied by the atlas texture when the material has one
   let base = tex_color(h.mat.tex, h.p, h.mat.alb);
   let slot = u32(h.slot);
-  let flags = matUVs[slot * 2u + 1u];
-  if (flags.y < 0.5) { return base; }
-  let mu = matUVs[slot * 2u];
+  let e1 = matUVs[slot * 3u + 1u];
+  if (e1.y < 0.5) { return base; }
+  let mu = matUVs[slot * 3u];
   let uv_a = vec2f(mu.x + h.tuv.x * mu.z, mu.y + h.tuv.y * mu.w);
-  return atlas_sample(u32(flags.x), uv_a) * base;
+  return atlas_sample(u32(e1.x), uv_a) * base;
 }
 `;
 
