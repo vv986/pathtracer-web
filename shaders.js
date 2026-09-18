@@ -490,6 +490,13 @@ fn trace(ro0: vec3f, rd0: vec3f, rng: ptr<function, u32>) -> vec3f {
       break;
     }
 
+    // thin-wall glass: tint and pass straight through (architectural windows)
+    if (h.mat.mtype == 4i) {
+      tp = tp * tex_color(h.mat.tex, h.p, h.mat.alb);
+      ro = h.p + rd * 0.002;
+      continue;
+    }
+
     // glass
     if (h.mat.mtype == 2i) {
       let ior = select(h.mat.ior, 1.0 / h.mat.ior, h.front);

@@ -203,7 +203,7 @@ export function parseGLTF(json, bin, opts = {}) {
     const sLum = 0.2126 * spec[0] + 0.7152 * spec[1] + 0.0722 * spec[2];
     let mtype = 0, rough = 1, albedo = diffuse;
     if (m.alphaMode === 'BLEND') {
-      mtype = 2; rough = 0; albedo = [0.9, 0.95, 1.0];          // treat blend = glass
+      mtype = 4; rough = 0; albedo = diffuse.map((v) => Math.min(1, v * 0.9 + 0.05)); // thin-wall glass
     } else if (dLum < 0.08 && sLum > 0.4) {
       mtype = 1; rough = Math.min(1, Math.max(0.04, 1 - gloss)); // metallic paint / windows
       albedo = spec;
@@ -333,29 +333,27 @@ export function buildBVHIndexed(positions, indices, normals) {
   for (let i = 0; i < numTris; i++) order[i] = i;
 
   const nodes = []; // flat objects during build
-  const LEAF = 8;
+  const LEAF_MAX = 8;   // always make a leaf at or below this size
+  const BIN = 12;       // SAH bins per axis
+  const MAX_DEPTH = 28;
+  const scratch = new Uint32Array(numTris);
+  const binCnt = new Uint32Array(BIN);
+  const binMin = new Float32Array(BIN * 3);
+  const binMax = new Float32Array(BIN * 3);
+  const leftCnt = new Uint32Array(BIN);
+  const leftMin = new Float32Array(BIN * 3);
+  const leftMax = new Float32Array(BIN * 3);
+  const rightCnt = new Uint32Array(BIN);
+  const rightMin = new Float32Array(BIN * 3);
+  const rightMax = new Float32Array(BIN * 3);
 
-  // move the median (by centroid[axis]) of order[first..first+count) into place
-  function quickselect(first, count, axis, mid) {
-    let lo = first, hi = first + count - 1;
-    const target = first + mid;
-    while (lo < hi) {
-      const pivot = centroid[order[hi] * 3 + axis];
-      let i = lo;
-      for (let j = lo; j < hi; j++) {
-        if (centroid[order[j] * 3 + axis] < pivot) {
-          const t = order[i]; order[i] = order[j]; order[j] = t;
-          i++;
-        }
-      }
-      const t = order[i]; order[i] = order[hi]; order[hi] = t;
-      if (i === target) return;
-      else if (i < target) lo = i + 1;
-      else hi = i - 1;
-    }
+  function halfArea(x0, y0, z0, x1, y1, z1) {
+    const dx = Math.max(0, x1 - x0), dy = Math.max(0, y1 - y0), dz = Math.max(0, z1 - z0);
+    return dx * dy + dy * dz + dz * dx; // half surface area (constant factor cancels)
   }
 
-  function build(first, count) {
+  // binned SAH build: pick the axis/split minimizing the traversal cost estimate
+  function build(first, count, depth) {
     let mx = 1e30, my = 1e30, mz = 1e30, Mx = -1e30, My = -1e30, Mz = -1e30;
     for (let i = 0; i < count; i++) {
       const t = order[first + i];
@@ -364,12 +362,13 @@ export function buildBVHIndexed(positions, indices, normals) {
       if (cMin[t * 3 + 2] < mz) mz = cMin[t * 3 + 2]; if (cMax[t * 3 + 2] > Mz) Mz = cMax[t * 3 + 2];
     }
     const id = nodes.push({ mx, my, mz, Mx, My, Mz, a: 0, b: 0, count: 0 }) - 1;
-    if (count <= LEAF) {
+    if (count <= LEAF_MAX || depth >= MAX_DEPTH) {
       nodes[id].a = first;
       nodes[id].count = count;
       return id;
     }
-    // longest centroid axis
+
+    // centroid bounds per axis
     let cmx = 1e30, cmy = 1e30, cmz = 1e30, CMx = -1e30, CMy = -1e30, CMz = -1e30;
     for (let i = 0; i < count; i++) {
       const t = order[first + i] * 3;
@@ -377,18 +376,95 @@ export function buildBVHIndexed(positions, indices, normals) {
       if (centroid[t + 1] < cmy) cmy = centroid[t + 1]; if (centroid[t + 1] > CMy) CMy = centroid[t + 1];
       if (centroid[t + 2] < cmz) cmz = centroid[t + 2]; if (centroid[t + 2] > CMz) CMz = centroid[t + 2];
     }
-    const ex = CMx - cmx, ey = CMy - cmy, ez = CMz - cmz;
-    const axis = ex > ey ? (ex > ez ? 0 : 2) : (ey > ez ? 1 : 2);
-    quickselect(first, count, axis, count >> 1);
-    const mid = count >> 1;
-    const L = build(first, mid);
-    const R = build(first + mid, count - mid);
+    const parentArea = halfArea(mx, my, mz, Mx, My, Mz) + 1e-12;
+    const leafCost = count;
+
+    let bestAxis = -1, bestSplit = -1, bestCost = leafCost;
+    for (let axis = 0; axis < 3; axis++) {
+      const lo = axis === 0 ? cmx : axis === 1 ? cmy : cmz;
+      const hi = axis === 0 ? CMx : axis === 1 ? CMy : CMz;
+      const extent = hi - lo;
+      if (extent <= 1e-9) continue;
+      const k0 = lo, k1 = BIN / extent;
+
+      binCnt.fill(0);
+      binMin.fill(1e30); binMax.fill(-1e30);
+      for (let i = first; i < first + count; i++) {
+        const t = order[i];
+        let b = ((centroid[t * 3 + axis] - k0) * k1) | 0;
+        if (b < 0) b = 0; else if (b >= BIN) b = BIN - 1;
+        binCnt[b]++;
+        if (cMin[t * 3] < binMin[b * 3]) binMin[b * 3] = cMin[t * 3];
+        if (cMax[t * 3] > binMax[b * 3]) binMax[b * 3] = cMax[t * 3];
+        if (cMin[t * 3 + 1] < binMin[b * 3 + 1]) binMin[b * 3 + 1] = cMin[t * 3 + 1];
+        if (cMax[t * 3 + 1] > binMax[b * 3 + 1]) binMax[b * 3 + 1] = cMax[t * 3 + 1];
+        if (cMin[t * 3 + 2] < binMin[b * 3 + 2]) binMin[b * 3 + 2] = cMin[t * 3 + 2];
+        if (cMax[t * 3 + 2] > binMax[b * 3 + 2]) binMax[b * 3 + 2] = cMax[t * 3 + 2];
+      }
+
+      // forward sweep: left side = bins 0..b
+      let cnt = 0, lx0 = 1e30, ly0 = 1e30, lz0 = 1e30, lx1 = -1e30, ly1 = -1e30, lz1 = -1e30;
+      for (let b = 0; b < BIN; b++) {
+        cnt += binCnt[b];
+        if (binMin[b * 3] < lx0) lx0 = binMin[b * 3]; if (binMax[b * 3] > lx1) lx1 = binMax[b * 3];
+        if (binMin[b * 3 + 1] < ly0) ly0 = binMin[b * 3 + 1]; if (binMax[b * 3 + 1] > ly1) ly1 = binMax[b * 3 + 1];
+        if (binMin[b * 3 + 2] < lz0) lz0 = binMin[b * 3 + 2]; if (binMax[b * 3 + 2] > lz1) lz1 = binMax[b * 3 + 2];
+        leftCnt[b] = cnt;
+        leftMin[b * 3] = lx0; leftMin[b * 3 + 1] = ly0; leftMin[b * 3 + 2] = lz0;
+        leftMax[b * 3] = lx1; leftMax[b * 3 + 1] = ly1; leftMax[b * 3 + 2] = lz1;
+      }
+      // backward sweep: right side = bins b+1..BIN-1
+      cnt = 0; lx0 = ly0 = lz0 = 1e30; lx1 = ly1 = lz1 = -1e30;
+      for (let b = BIN - 1; b >= 0; b--) {
+        cnt += binCnt[b];
+        if (binMin[b * 3] < lx0) lx0 = binMin[b * 3]; if (binMax[b * 3] > lx1) lx1 = binMax[b * 3];
+        if (binMin[b * 3 + 1] < ly0) ly0 = binMin[b * 3 + 1]; if (binMax[b * 3 + 1] > ly1) ly1 = binMax[b * 3 + 1];
+        if (binMin[b * 3 + 2] < lz0) lz0 = binMin[b * 3 + 2]; if (binMax[b * 3 + 2] > lz1) lz1 = binMax[b * 3 + 2];
+        rightCnt[b] = cnt;
+        rightMin[b * 3] = lx0; rightMin[b * 3 + 1] = ly0; rightMin[b * 3 + 2] = lz0;
+        rightMax[b * 3] = lx1; rightMax[b * 3 + 1] = ly1; rightMax[b * 3 + 2] = lz1;
+      }
+      for (let b = 0; b < BIN - 1; b++) {
+        const lc = leftCnt[b], rc = rightCnt[b + 1];
+        if (lc === 0 || rc === 0) continue;
+        const cost = 1 + (lc * halfArea(leftMin[b * 3], leftMin[b * 3 + 1], leftMin[b * 3 + 2],
+                                              leftMax[b * 3], leftMax[b * 3 + 1], leftMax[b * 3 + 2])
+                        + rc * halfArea(rightMin[(b + 1) * 3], rightMin[(b + 1) * 3 + 1], rightMin[(b + 1) * 3 + 2],
+                                              rightMax[(b + 1) * 3], rightMax[(b + 1) * 3 + 1], rightMax[(b + 1) * 3 + 2])) / parentArea;
+        if (cost < bestCost) { bestCost = cost; bestAxis = axis; bestSplit = b; }
+      }
+    }
+
+    if (bestAxis < 0 || bestCost >= leafCost) {
+      // splitting doesn't pay off: keep everything in one (possibly large) leaf
+      nodes[id].a = first;
+      nodes[id].count = count;
+      return id;
+    }
+
+    // partition triangles by bin index (left: bins <= bestSplit)
+    const plo = bestAxis === 0 ? cmx : bestAxis === 1 ? cmy : cmz;
+    const phi = bestAxis === 0 ? CMx : bestAxis === 1 ? CMy : CMz;
+    const k1 = BIN / (phi - plo);
+    let nL = 0, nR = 0;
+    for (let i = first; i < first + count; i++) {
+      const t = order[i];
+      let b = ((centroid[t * 3 + bestAxis] - plo) * k1) | 0;
+      if (b < 0) b = 0; else if (b >= BIN) b = BIN - 1;
+      if (b <= bestSplit) scratch[nL++] = t;
+      else scratch[numTris - 1 - (nR++)] = t;
+    }
+    for (let i = 0; i < nL; i++) order[first + i] = scratch[i];
+    for (let i = 0; i < nR; i++) order[first + nL + i] = scratch[numTris - nR + i];
+
+    const L = build(first, nL, depth + 1);
+    const R = build(first + nL, nR, depth + 1);
     nodes[id].a = L;
     nodes[id].b = R;
     return id;
   }
 
-  build(0, numTris);
+  build(0, numTris, 0);
 
   // flatten (children contiguous) + materialize ordered index buffer
   const nodesFlat = new Float32Array(nodes.length * 12);

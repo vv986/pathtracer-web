@@ -1,7 +1,7 @@
 // GPU orchestration: pipelines, per-scene buffers, camera, UI, frame loop.
 
-import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=10';
-import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=10';
+import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=11';
+import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=11';
 
 const errBox = document.getElementById('err');
 function showErr(msg) {
