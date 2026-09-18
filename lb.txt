@@ -14,11 +14,6 @@ class F32 {
     this.a[this.n] = x; this.a[this.n + 1] = y; this.a[this.n + 2] = z;
     this.n += 3;
   }
-  push2(x, y) {
-    if (this.n + 2 > this.a.length) this.grow(this.n + 2);
-    this.a[this.n] = x; this.a[this.n + 1] = y;
-    this.n += 2;
-  }
   grow(need) {
     let cap = this.a.length * 2 || 4096;
     while (cap < need) cap *= 2;
@@ -224,7 +219,6 @@ export function parseGLTF(json, bin, opts = {}) {
   // expand instances
   const verts = new F32(1 << 22);
   const norms = new F32(1 << 22);
-  const tuvs = new F32(1 << 21);   // 2 floats per vertex
   const tris = new U32(1 << 23);
   const matSlot = new U32(1 << 22); // per-vertex material index (exact: each glTF primitive owns its vertices)
   let numVerts = 0;
@@ -241,18 +235,12 @@ export function parseGLTF(json, bin, opts = {}) {
       const I = prim.indices !== undefined ? readIndices(prim.indices) : null;
       const base = numVerts;
       const vcount = P.length / 3;
-      const T = prim.attributes.TEXCOORD_0 !== undefined ? readAccessor(prim.attributes.TEXCOORD_0) : null;
       for (let i = 0; i < vcount; i++) {
         const x = P[i * 3], y = P[i * 3 + 1], z = P[i * 3 + 2];
         const wx = m[0] * x + m[4] * y + m[8] * z + m[12];
         const wy = m[1] * x + m[5] * y + m[9] * z + m[13];
         const wz = m[2] * x + m[6] * y + m[10] * z + m[14];
         verts.push3(wx, wy, wz);
-        if (T) {
-          tuvs.push2(T[i * 2], T[i * 2 + 1]);
-        } else {
-          tuvs.push2(0, 0);
-        }
         if (N) {
           const nx = N[i * 3], ny = N[i * 3 + 1], nz = N[i * 3 + 2];
           let tx = m[0] * nx + m[4] * ny + m[8] * nz;
@@ -283,7 +271,6 @@ export function parseGLTF(json, bin, opts = {}) {
   return {
     positions: verts.view(),
     normals: norms.view(),
-    tuvs: tuvs.view(),
     tris: tris.view(),
     matSlot: matSlotOut,
     mats,

@@ -1,0 +1,72 @@
+fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -> bool {
+  var best = tmax;
+  var found = false;
+  var stack: array<u32, 48>;
+  var sp = 0u;
+  stack[0] = 0u;
+  sp = 1u;
+  let inv = 1.0 / rd;
+
+  loop {
+    if (sp == 0u) { break; }
+    sp = sp - 1u;
+    let nd = nodes[stack[sp]];
+    if (!aabb_hit(nd.bmin.xyz, nd.bmax.xyz, ro, inv, best)) { continue; }
+
+    let cnt = u32(nd.mi.z);
+    if (cnt > 0u) {
+      let first = u32(nd.mi.x);
+      for (var i = 0u; i < cnt; i = i + 1u) {
+        let ti = first + i;
+        let i0 = mIdx[ti * 3u + 0u];
+        let i1 = mIdx[ti * 3u + 1u];
+        let i2 = mIdx[ti * 3u + 2u];
+        let v0 = verts[i0].xyz;
+        let v1 = verts[i1].xyz;
+        let v2 = verts[i2].xyz;
+        let e1 = v1 - v0;
+        let e2 = v2 - v0;
+        let pv = cross(rd, e2);
+        let det = dot(e1, pv);
+        if (abs(det) < 1e-9) { continue; }
+        let invd = 1.0 / det;
+        let tv = ro - v0;
+        let uu = dot(tv, pv) * invd;
+        if (uu < 0.0 || uu > 1.0) { continue; }
+        let qv = cross(tv, e1);
+        let wv = dot(rd, qv) * invd;
+        if (wv < 0.0 || uu + wv > 1.0) { continue; }
+        let t = dot(e2, qv) * invd;
+        if (t < tmin || t > best) { continue; }
+
+        let n_g = normalize(cross(e1, e2));
+        let front = dot(rd, n_g) < 0.0;
+        let n0 = vnorms[i0].xyz;
+        let n1 = vnorms[i1].xyz;
+        let n2 = vnorms[i2].xyz;
+        var n_s = normalize((1.0 - uu - wv) * n0 + uu * n1 + wv * n2);
+        if (dot(n_s, n_g) < 0.0) { n_s = -n_s; }
+
+        let ms = u32(verts[i0].w);
+        let mat = Mat(i32(mat_alb[ms].w), 0i, mat_prm[ms].x, mat_prm[ms].y, mat_alb[ms].xyz);
+        (*h) = Hit(t, ro + rd * t, select(n_g, n_s, true), front, mat);
+        found = true;
+        best = t;
+      }
+    } else {
+      // internal node: visit the nearer child first (tightens best-t faster)
+      let l = u32(nd.mi.x);
+      let r = u32(nd.mi.y);
+      let hitL = aabb_hit(nodes[l].bmin.xyz, nodes[l].bmax.xyz, ro, inv, best);
+      let hitR = aabb_hit(nodes[r].bmin.xyz, nodes[r].bmax.xyz, ro, inv, best);
+      if (hitL && hitR) {
+        let cl = (nodes[l].bmin.xyz + nodes[l].bmax.xyz) * 0.5;
+        let cr = (nodes[r].bmin.xyz + nodes[r].bmax.xyz) * 0.5;
+        // true = L is nearer; push far first so near is popped first
+        let lNearer = dot(cl - ro, rd) < dot(cr - ro, rd);
+        let nearC = select(r, l, lNearer);
+        let farC = select(l, r, lNearer);
+        stack[sp] = farC; sp = sp + 1u;
+        stack[sp] = nearC; sp = sp + 1u;
+      } else if (hitL) {
+        stack

@@ -1,0 +1,20 @@
+MESH_PART at 9534
+const MESH_PART = /* wgsl */ `
+struct BVHNode {
+  bmin : vec4f,
+  bmax : vec4f,
+  mi   : vec4f,   // packed as floats; leaf: x = first tri, z = count; internal: x = left, y = right
+};
+
+@group(0) @binding(5) var<storage, read> nodes : array<BVHNode>;
+@group(0) @binding(6) var<storage, read> verts : array<vec4f>;   // xyz + material slot
+@group(0) @binding(7) var<storage, read> vnorms : array<vec4f>;
+@group(0) @binding(8) var<storage, read> mIdx : array<u32>;      // 3 per triangle
+@group(0) @binding(10) var<storage, read> mat_alb : array<vec4f>; // rgb + mtype
+@group(0) @binding(11) var<storage, read> mat_prm : array<vec4f>; // rough + ior
+@group(0) @binding(12) var<storage, read> tuvs : array<vec4f>;    // per-vertex uv
+@group(0) @binding(13) var atlasTex : binding_array<texture_2d<f32>, 8>;
+@group(0) @binding(14) var texSamp : sampler;
+@group(0) @binding(15) var<storage, read> matUVs : array<vec4f>;  // 2 per material: [u0,v0,su,sv] [page,hasTex,0,0]
+@group(0) @binding(10) var<storage, read> mat_alb : array<vec4f>; // rgb + mtype
+@group(0) @binding(11) var<storage, read> mat_prm : a

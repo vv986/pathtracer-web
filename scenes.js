@@ -5,7 +5,7 @@
 //   verts4 = xyz + material slot, palette = per-slot {albedo, mtype, rough, ior}.
 // Material types: 0 diffuse, 1 metal (GGX), 2 glass, 3 emissive.
 
-import { parseOBJ, parseGLTF, buildBVHIndexed } from './bvh.js?v=12';
+import { parseOBJ, parseGLTF, buildBVHIndexed } from './bvh.js?v=13';
 
 const SUN_DIR = (() => {
   const l = Math.hypot(-0.45, 0.38, -0.55);
@@ -87,12 +87,13 @@ function addBox(arr, a, b, deg, tr, mtype, tex, alb, rough) {
 
 // pack mesh scene from BVH output + palette; matSlotPerVert: Uint32Array or null (=0)
 function packMeshScene(mesh, palette) {
-  const { positions, normals, tris } = mesh;
+  const { positions, normals, tuvs, tris } = mesh;
   const numVerts = normals.length / 3;
   const verts4 = new Float32Array(numVerts * 4);
   // normals MUST be padded to a 16-byte stride too: the shader reads array<vec4f>,
   // and an unpadded 3-float buffer desyncs every vertex past the first third
   const norms4 = new Float32Array(numVerts * 4);
+  const tex4 = new Float32Array(numVerts * 4);
   for (let i = 0; i < numVerts; i++) {
     verts4[i * 4] = positions[i * 3];
     verts4[i * 4 + 1] = positions[i * 3 + 1];
@@ -100,6 +101,8 @@ function packMeshScene(mesh, palette) {
     norms4[i * 4] = normals[i * 3];
     norms4[i * 4 + 1] = normals[i * 3 + 1];
     norms4[i * 4 + 2] = normals[i * 3 + 2];
+    tex4[i * 4] = tuvs ? tuvs[i * 2] : 0;
+    tex4[i * 4 + 1] = tuvs ? tuvs[i * 2 + 1] : 0;
   }
   if (mesh.matSlot) {
     for (let i = 0; i < numVerts; i++) verts4[i * 4 + 3] = mesh.matSlot[i];
@@ -110,7 +113,7 @@ function packMeshScene(mesh, palette) {
     palAlb.set([m.albedo[0], m.albedo[1], m.albedo[2], m.mtype], i * 4);
     palPrm.set([m.rough, m.ior, 0, 0], i * 4);
   });
-  return { verts4, vnorm: norms4, idx: mesh.idx, nodes: mesh.nodes, numTris: mesh.numTris, palAlb, palPrm };
+  return { verts4, vnorm: norms4, tex4, idx: mesh.idx, nodes: mesh.nodes, numTris: mesh.numTris, palAlb, palPrm };
 }
 
 // ---------------- Cornell Box ----------------
@@ -308,8 +311,34 @@ async function buildBistro() {
   const bin = (await fetchBytes('models/bistro.bin')).buffer;
 
   const mesh = parseGLTF(json, bin, { tint: true });
+
+  // diffuse texture atlas (built by tools/build_atlas.py); graceful fallback to flat colors
+  let atlas = { bitmaps: [], matUV: new Float32Array(mesh.mats.length * 8) };
+  try {
+    const texJson = JSON.parse(new TextDecoder().decode(await fetchBytes('models/bistro_tex.json')));
+    const bitmaps = [];
+    for (let i = 0; i < texJson.pages; i++) {
+      const bytes = await fetchBytes('models/atlas_' + i + '.jpg');
+      bitmaps.push(await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
+    }
+    const M = mesh.mats.length;
+    const matUV = new Float32Array(M * 8);
+    for (let mi = 0; mi < M; mi++) {
+      const s = texJson.slots[String(mi)];
+      if (s) {
+        matUV.set([s[0], s[1], s[2], s[3]], mi * 8);
+        matUV.set([s[4], s[5], 0, 0], mi * 8 + 4);
+      }
+    }
+    atlas = { bitmaps, matUV };
+  } catch (e) {
+    console.warn('atlas unavailable, falling back to flat colors:', String(e).slice(0, 100));
+  }
+
   const hud = document.getElementById('hud');
-  hud.textContent = '模型下载完成 — 构建 BVH(421 万三角形,页面会冻结十几秒)…';
+  hud.textContent = atlas.bitmaps.length
+    ? '模型下载完成 — 构建 BVH(421 万三角形 + 贴图图集,页面会冻结十几秒)…'
+    : '模型下载完成 — 构建 BVH(421 万三角形,页面会冻结十几秒)…';
   await new Promise((r) => setTimeout(r, 60));
   const bvh = buildBVHIndexed(mesh.positions, mesh.tris, mesh.normals);
   const meshScene = packMeshScene(
@@ -321,6 +350,7 @@ async function buildBistro() {
   return {
     name: 'Bistro', type: 'mesh',
     mesh: meshScene, spheres: new Float32Array(spheres.flat()),
+    atlas,
     lightQuadIdx: -1, lightSphereIdx: sunIdx, lightQuadArea: 0,
     skyMode: 1, sunDir: SUN_DIR, numTris: bvh.numTris,
     resScale: 0.5, maxDepth: 8,

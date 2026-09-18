@@ -42,8 +42,6 @@ struct Hit {
   n    : vec3f,
   front: bool,
   mat  : Mat,
-  tuv  : vec2f,
-  slot : i32,
 };
 
 @group(0) @binding(0) var<uniform> u : Uniforms;
@@ -208,7 +206,7 @@ fn hit_quad(qd: Quad, ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<functio
   if (alpha < 0.0 || alpha > 1.0 || beta < 0.0 || beta > 1.0) { return false; }
   let front = dot(rd, nn) < 0.0;
   let mat = Mat(i32(qd.q.w), i32(qd.uu.w), qd.alb.w, 0.0, qd.alb.xyz);
-  (*h) = Hit(t, p, select(-nn, nn, front), front, mat, vec2f(0.0), 0i);
+  (*h) = Hit(t, p, select(-nn, nn, front), front, mat);
   return true;
 }
 
@@ -230,7 +228,7 @@ fn hit_sphere_s(s: Sphere, ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<fu
   let n_out = (p - s.pr.xyz) / rad;
   let front = dot(rd, n_out) < 0.0;
   let mat = Mat(i32(s.m.x), i32(s.m.y), s.m.z, s.m.w, s.alb.xyz);
-  (*h) = Hit(t, p, select(-n_out, n_out, front), front, mat, vec2f(0.0), 0i);
+  (*h) = Hit(t, p, select(-n_out, n_out, front), front, mat);
   return true;
 }
 
@@ -315,17 +313,6 @@ struct BVHNode {
 @group(0) @binding(8) var<storage, read> mIdx : array<u32>;      // 3 per triangle
 @group(0) @binding(10) var<storage, read> mat_alb : array<vec4f>; // rgb + mtype
 @group(0) @binding(11) var<storage, read> mat_prm : array<vec4f>; // rough + ior
-@group(0) @binding(12) var<storage, read> tuvs : array<vec4f>;    // per-vertex uv
-@group(0) @binding(30) var atlas0 : texture_2d<f32>;
-@group(0) @binding(31) var atlas1 : texture_2d<f32>;
-@group(0) @binding(32) var atlas2 : texture_2d<f32>;
-@group(0) @binding(33) var atlas3 : texture_2d<f32>;
-@group(0) @binding(34) var atlas4 : texture_2d<f32>;
-@group(0) @binding(35) var atlas5 : texture_2d<f32>;
-@group(0) @binding(36) var atlas6 : texture_2d<f32>;
-@group(0) @binding(37) var atlas7 : texture_2d<f32>;
-@group(0) @binding(38) var texSamp : sampler;
-@group(0) @binding(15) var<storage, read> matUVs : array<vec4f>;  // 2 per material: [u0,v0,su,sv] [page,hasTex,0,0]
 
 fn aabb_hit(bmin: vec3f, bmax: vec3f, ro: vec3f, inv: vec3f, tmax: f32) -> bool {
   let t0 = (bmin - ro) * inv;
@@ -386,11 +373,7 @@ fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -
 
         let ms = u32(verts[i0].w);
         let mat = Mat(i32(mat_alb[ms].w), 0i, mat_prm[ms].x, mat_prm[ms].y, mat_alb[ms].xyz);
-        let t0 = tuvs[i0].xy;
-        let t1 = tuvs[i1].xy;
-        let t2 = tuvs[i2].xy;
-        let uv_s = (1.0 - uu - wv) * t0 + uu * t1 + wv * t2;
-        (*h) = Hit(t, ro + rd * t, select(n_g, n_s, true), front, mat, uv_s, i32(ms));
+        (*h) = Hit(t, ro + rd * t, select(n_g, n_s, true), front, mat);
         found = true;
         best = t;
       }
@@ -418,38 +401,11 @@ fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -
   }
   return found;
 }
-
-fn atlas_sample(page: u32, uv: vec2f) -> vec3f {
-  if (page == 0u) { return textureSampleLevel(atlas0, texSamp, uv, 0.0).rgb; }
-  if (page == 1u) { return textureSampleLevel(atlas1, texSamp, uv, 0.0).rgb; }
-  if (page == 2u) { return textureSampleLevel(atlas2, texSamp, uv, 0.0).rgb; }
-  if (page == 3u) { return textureSampleLevel(atlas3, texSamp, uv, 0.0).rgb; }
-  if (page == 4u) { return textureSampleLevel(atlas4, texSamp, uv, 0.0).rgb; }
-  if (page == 5u) { return textureSampleLevel(atlas5, texSamp, uv, 0.0).rgb; }
-  if (page == 6u) { return textureSampleLevel(atlas6, texSamp, uv, 0.0).rgb; }
-  if (page == 7u) { return textureSampleLevel(atlas7, texSamp, uv, 0.0).rgb; }
-  return vec3f(0.0);
-}
-
-fn sample_albedo(h: Hit) -> vec3f {
-  // procedural base color, multiplied by the atlas texture when the material has one
-  let base = tex_color(h.mat.tex, h.p, h.mat.alb);
-  let slot = u32(h.slot);
-  let flags = matUVs[slot * 2u + 1u];
-  if (flags.y < 0.5) { return base; }
-  let mu = matUVs[slot * 2u];
-  let uv_a = vec2f(mu.x + h.tuv.x * mu.z, mu.y + h.tuv.y * mu.w);
-  return atlas_sample(u32(flags.x), uv_a) * base;
-}
 `;
 
 export const PRIM_STUB = /* wgsl */ `
 fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -> bool {
   return false;
-}
-
-fn sample_albedo(h: Hit) -> vec3f {
-  return tex_color(h.mat.tex, h.p, h.mat.alb);
 }
 `;
 
@@ -534,13 +490,6 @@ fn trace(ro0: vec3f, rd0: vec3f, rng: ptr<function, u32>) -> vec3f {
       break;
     }
 
-    // thin-wall glass: tint and pass straight through (architectural windows)
-    if (h.mat.mtype == 4i) {
-      tp = tp * tex_color(h.mat.tex, h.p, h.mat.alb);
-      ro = h.p + rd * 0.002;
-      continue;
-    }
-
     // glass
     if (h.mat.mtype == 2i) {
       let ior = select(h.mat.ior, 1.0 / h.mat.ior, h.front);
@@ -593,7 +542,7 @@ fn trace(ro0: vec3f, rd0: vec3f, rng: ptr<function, u32>) -> vec3f {
     let scat = max(0.0, dot(h.n, chosen)) / PI;
     if (scat <= 0.0) { failed = true; break; }
 
-    tp = tp * sample_albedo(h) * (scat / pdf);
+    tp = tp * tex_color(h.mat.tex, h.p, h.mat.alb) * (scat / pdf);
     ro = h.p + h.n * 0.002;
     rd = chosen;
   }
