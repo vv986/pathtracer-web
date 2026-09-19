@@ -597,35 +597,38 @@ window.__dbg = {
     st.destroy();
     return out;
   },
-  // statistics over the accumulation buffer: NaN / dark / mean relative std (convergence)
+  // statistics over the accumulation buffer: sampled subset (every 16th pixel) to keep readbacks light
   async accumStats() {
     if (!accumBuf) return null;
-    const st = device.createBuffer({ size: accumBuf.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const stride = 16;   // sample every 16th pixel -> ~64KB readback at 720p
+    const samples = Math.floor((W * H) / stride);
+    const st = device.createBuffer({ size: samples * 32, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const enc = device.createCommandEncoder();
-    enc.copyBufferToBuffer(accumBuf, 0, st, 0, accumBuf.size);
+    for (let k = 0; k < samples; k++) {
+      const srcOff = k * stride * 32;
+      enc.copyBufferToBuffer(accumBuf, srcOff, st, k * 32, 32);
+    }
     device.queue.submit([enc.finish()]);
     await device.queue.onSubmittedWorkDone();
     await st.mapAsync(GPUMapMode.READ);
     const f = new Float32Array(st.getMappedRange());
-    const total = W * H;
     let nan = 0, dark = 0, relSum = 0;
     const c = Math.max(1, totalSamples);
-    for (let i = 0; i < total; i++) {
-      const b0 = i * 8;
+    for (let k = 0; k < samples; k++) {
+      const b0 = k * 8;
       const mr = f[b0] / c, mg = f[b0 + 1] / c, mb = f[b0 + 2] / c;
       const qr = f[b0 + 4] / c, qg = f[b0 + 5] / c, qb = f[b0 + 6] / c;
       if (Number.isNaN(mr) || Number.isNaN(mg) || Number.isNaN(mb)) { nan++; continue; }
       const vr = Math.max(0, qr - mr * mr), vg = Math.max(0, qg - mg * mg), vb = Math.max(0, qb - mb * mb);
       const lm = 0.2126 * mr + 0.7152 * mg + 0.0722 * mb + 1e-3;
       const vl = Math.max(0, 0.2126 * vr + 0.7152 * vg + 0.0722 * vb);
-      const rs = Math.sqrt(vl) / lm;
-      relSum += Math.min(rs, 2);
+      relSum += Math.min(Math.sqrt(vl) / lm, 2);
       if (mr * mr + mg * mg + mb * mb < 1e-6) dark++;
     }
     st.unmap();
     st.destroy();
-    return { total, nanFrac: (nan / total).toFixed(3), darkFrac: (dark / total).toFixed(3),
-             relStd: (relSum / total).toFixed(4) };
+    return { samples, nanFrac: (nan / samples).toFixed(3), darkFrac: (dark / samples).toFixed(3),
+             relStd: (relSum / samples).toFixed(4) };
   },
   // statistics over the mesh normal buffer: NaN / near-zero normals
   async vnormStats() {
