@@ -330,9 +330,17 @@ let blitBind = null;
 // ---- init ----
 
 async function init() {
-  if (!navigator.gpu) throw new Error('此浏览器不支持 WebGPU,请使用 Chrome / Edge 113+');
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) throw new Error('未找到可用 GPU 适配器');
+  if (!navigator.gpu) throw new Error('此浏览器不支持 WebGPU,请使用最新版 Chrome / Edge / Firefox');
+  // retry: after a GPU crash the adapter may be briefly unavailable
+  let adapter = null;
+  for (let i = 0; i < 6; i++) {
+    adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) adapter = await navigator.gpu.requestAdapter();
+    if (adapter) break;
+    showErr(`GPU 适配器暂时不可用(${i + 1}/6),2 秒后重试…若持续失败请完全重启浏览器`);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  if (!adapter) throw new Error('未找到 GPU 适配器——若之前能正常显示,请完全退出浏览器(所有窗口)后重开;若从未成功过,请确认浏览器为最新版且已开启硬件加速');
   device = await adapter.requestDevice({ requiredLimits: {
     maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
     maxBufferSize: adapter.limits.maxBufferSize,
