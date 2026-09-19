@@ -96,7 +96,7 @@ function clampCam() {
 function createFrameBuffers(w, h) {
   [W, H] = [w, h];
   canvas.width = W; canvas.height = H;
-  accumBuf = device.createBuffer({ size: W * H * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  accumBuf = device.createBuffer({ size: W * H * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   histBuf = device.createBuffer({ size: W * H * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   histZero = new Float32Array(W * H * 4);
   outTex = device.createTexture({ size: [W, H], format: 'rgba16float',
