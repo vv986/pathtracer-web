@@ -1,7 +1,7 @@
 // GPU orchestration: pipelines, per-scene buffers, camera, UI, frame loop.
 
-import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=14';
-import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=14';
+import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=15';
+import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=15';
 
 const errBox = document.getElementById('err');
 function showErr(msg) {
@@ -352,8 +352,16 @@ let blitBind = null;
 
 async function init() {
   if (!navigator.gpu) throw new Error('此浏览器不支持 WebGPU,请使用 Chrome / Edge 113+');
-  const adapter = await navigator.gpu.requestAdapter();
-  if (!adapter) throw new Error('未找到可用 GPU 适配器');
+  // retry: right after a GPU crash Chrome may briefly refuse to hand out adapters
+  let adapter = null;
+  for (let i = 0; i < 6; i++) {
+    adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) adapter = await navigator.gpu.requestAdapter();
+    if (adapter) break;
+    showErr(`GPU 适配器暂时不可用,${(i + 1) * 2} 秒后重试…`);
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+  if (!adapter) throw new Error('未找到可用 GPU 适配器——请完全退出浏览器(所有窗口)后重开,或重启电脑');
   device = await adapter.requestDevice({ requiredLimits: {
     maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
     maxBufferSize: adapter.limits.maxBufferSize,
