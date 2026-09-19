@@ -497,18 +497,21 @@ export function buildBVHIndexed(positions, indices, normals) {
   build(0, numTris, 0);
 
   // flatten (children contiguous) + materialize ordered index buffer
-  const nodesFlat = new Float32Array(nodes.length * 12);
+  // compact 32B nodes: bmin.xyz + metaA, bmax.xyz + metaB
+  // leaf:   metaA = first tri (ordered), metaB = tri count (>0)
+  // internal: metaA = left child, metaB = right child
+  const nodesFlat = new Float32Array(nodes.length * 8);
   const idx = new Uint32Array(numTris * 3);
   let nodeCount = 0, triCount = 0;
   function flatten(id) {
     const n = nodes[id];
     const my = nodeCount++;
-    const o = my * 12;
+    const o = my * 8;
     nodesFlat[o] = n.mx; nodesFlat[o + 1] = n.my; nodesFlat[o + 2] = n.mz;
     nodesFlat[o + 4] = n.Mx; nodesFlat[o + 5] = n.My; nodesFlat[o + 6] = n.Mz;
     if (n.count > 0) {
-      nodesFlat[o + 8] = triCount;
-      nodesFlat[o + 10] = n.count;
+      nodesFlat[o + 3] = triCount;          // metaA = first tri (ordered)
+      nodesFlat[o + 7] = n.count;           // metaB = leaf size (>0 marks leaf)
       for (let i = 0; i < n.count; i++) {
         const t = order[n.a + i];
         idx[triCount * 3] = indices[t * 3];
@@ -520,9 +523,8 @@ export function buildBVHIndexed(positions, indices, normals) {
     }
     const L = flatten(n.a);
     const R = flatten(n.b);
-    nodesFlat[o + 8] = L;
-    nodesFlat[o + 9] = R;
-    nodesFlat[o + 10] = 0;
+    nodesFlat[o + 3] = L;                   // metaA = left child
+    nodesFlat[o + 7] = R;                   // metaB = right child
     return my;
   }
   flatten(0);

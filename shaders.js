@@ -304,18 +304,21 @@ fn sph_light_gen(dir_c: vec3f, rad: f32, r: ptr<function, u32>) -> vec3f {
 // Mesh scene: BVH data bindings + traversal. Prim scenes stub mesh_hit out.
 export const MESH_PART = /* wgsl */ `
 struct BVHNode {
-  bmin : vec4f,
-  bmax : vec4f,
-  mi   : vec4f,   // packed as floats; leaf: x = first tri, z = count; internal: x = left, y = right
+  bmin : vec4f,   // min.xyz, metaA (leaf: first tri | internal: left child)
+  bmax : vec4f,   // max.xyz, metaB (leaf: tri count >0 | internal: right child)
 };
 
 @group(0) @binding(5) var<storage, read> nodes : array<BVHNode>;
 @group(0) @binding(6) var<storage, read> verts : array<vec4f>;   // xyz + material slot
-@group(0) @binding(7) var<storage, read> vnorms : array<vec4f>;
+@group(0) @binding(7) var<storage, read> vnormP : array<u32>;     // 2 u32 per vertex: packed i16 normals
+@group(0) @binding(12) var<storage, read> tuvP : array<u32>;      // 1 u32 per vertex: packed i16 uv
+@group(0) @binding(16) var<storage, read> tanP : array<u32>;      // 2 u32 per vertex: packed i16 tangents
+
+fn s16lo(w: u32) -> f32 { return f32(bitcast<i32>(w << 16u) >> 16u) / 32767.0; }
+fn s16hi(w: u32) -> f32 { return f32(bitcast<i32>(w & 0xFFFF0000u) >> 16u) / 32767.0; }
 @group(0) @binding(8) var<storage, read> mIdx : array<u32>;      // 3 per triangle
 @group(0) @binding(10) var<storage, read> mat_alb : array<vec4f>; // rgb + mtype
 @group(0) @binding(11) var<storage, read> mat_prm : array<vec4f>; // rough + ior
-@group(0) @binding(12) var<storage, read> tuvs : array<vec4f>;    // per-vertex uv
 @group(0) @binding(30) var atlas0 : texture_2d<f32>;
 @group(0) @binding(31) var atlas1 : texture_2d<f32>;
 @group(0) @binding(32) var atlas2 : texture_2d<f32>;
@@ -326,7 +329,6 @@ struct BVHNode {
 @group(0) @binding(37) var atlas7 : texture_2d<f32>;
 @group(0) @binding(38) var texSamp : sampler;
 @group(0) @binding(15) var<storage, read> matUVs : array<vec4f>;  // 3 per material: [au0,av0,asu,asv] [pgA,hasAlb,nu0,nv0] [nsu,nsv,pgN,hasNrm]
-@group(0) @binding(16) var<storage, read> tans : array<vec4f>;    // per-vertex tangent xyz + handedness
 @group(0) @binding(40) var nrm0 : texture_2d<f32>;
 @group(0) @binding(41) var nrm1 : texture_2d<f32>;
 @group(0) @binding(42) var nrm2 : texture_2d<f32>;
@@ -359,9 +361,9 @@ fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -
     let nd = nodes[stack[sp]];
     if (!aabb_hit(nd.bmin.xyz, nd.bmax.xyz, ro, inv, best)) { continue; }
 
-    let cnt = u32(nd.mi.z);
+    let cnt = u32(nd.bmax.w);
     if (cnt > 0u) {
-      let first = u32(nd.mi.x);
+      let first = u32(nd.bmin.w);
       for (var i = 0u; i < cnt; i = i + 1u) {
         let ti = first + i;
         let i0 = mIdx[ti * 3u + 0u];
@@ -387,17 +389,17 @@ fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -
 
         let n_g = normalize(cross(e1, e2));
         let front = dot(rd, n_g) < 0.0;
-        let n0 = vnorms[i0].xyz;
-        let n1 = vnorms[i1].xyz;
-        let n2 = vnorms[i2].xyz;
+        let n0 = vec3f(s16lo(vnormP[i0 * 2u]), s16hi(vnormP[i0 * 2u]), s16lo(vnormP[i0 * 2u + 1u]));
+        let n1 = vec3f(s16lo(vnormP[i1 * 2u]), s16hi(vnormP[i1 * 2u]), s16lo(vnormP[i1 * 2u + 1u]));
+        let n2 = vec3f(s16lo(vnormP[i2 * 2u]), s16hi(vnormP[i2 * 2u]), s16lo(vnormP[i2 * 2u + 1u]));
         var n_s = normalize((1.0 - uu - wv) * n0 + uu * n1 + wv * n2);
         if (dot(n_s, n_g) < 0.0) { n_s = -n_s; }
 
         let ms = u32(verts[i0].w);
         let mat = Mat(i32(mat_alb[ms].w), 0i, mat_prm[ms].x, mat_prm[ms].y, mat_alb[ms].xyz);
-        let t0 = tuvs[i0].xy;
-        let t1 = tuvs[i1].xy;
-        let t2 = tuvs[i2].xy;
+        let t0 = vec2f(s16lo(tuvP[i0]), s16hi(tuvP[i0]));
+        let t1 = vec2f(s16lo(tuvP[i1]), s16hi(tuvP[i1]));
+        let t2 = vec2f(s16lo(tuvP[i2]), s16hi(tuvP[i2]));
         let uv_s = (1.0 - uu - wv) * t0 + uu * t1 + wv * t2;
 
         // normal mapping: TBN perturbation when the material slot has a normal tile
@@ -405,9 +407,9 @@ fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -
         let e2m = matUVs[ms * 3u + 2u];
         var n_sh = n_s;
         if (e2m.w > 0.5) {
-          let g0 = tans[i0];
-          let g1 = tans[i1];
-          let g2 = tans[i2];
+          let g0 = vec4f(s16lo(tanP[i0 * 2u]), s16hi(tanP[i0 * 2u]), s16lo(tanP[i0 * 2u + 1u]), s16hi(tanP[i0 * 2u + 1u]));
+          let g1 = vec4f(s16lo(tanP[i1 * 2u]), s16hi(tanP[i1 * 2u]), s16lo(tanP[i1 * 2u + 1u]), s16hi(tanP[i1 * 2u + 1u]));
+          let g2 = vec4f(s16lo(tanP[i2 * 2u]), s16hi(tanP[i2 * 2u]), s16lo(tanP[i2 * 2u + 1u]), s16hi(tanP[i2 * 2u + 1u]));
           var t_t = (1.0 - uu - wv) * g0.xyz + uu * g1.xyz + wv * g2.xyz;
           let t_w = (1.0 - uu - wv) * g0.w + uu * g1.w + wv * g2.w;
           t_t = normalize(t_t - n_s * dot(n_s, t_t));
@@ -423,8 +425,8 @@ fn mesh_hit(ro: vec3f, rd: vec3f, tmin: f32, tmax: f32, h: ptr<function, Hit>) -
       }
     } else {
       // internal node: visit the nearer child first (tightens best-t faster)
-      let l = u32(nd.mi.x);
-      let r = u32(nd.mi.y);
+      let l = u32(nd.bmin.w);
+      let r = u32(nd.bmax.w);
       let hitL = aabb_hit(nodes[l].bmin.xyz, nodes[l].bmax.xyz, ro, inv, best);
       let hitR = aabb_hit(nodes[r].bmin.xyz, nodes[r].bmax.xyz, ro, inv, best);
       if (hitL && hitR) {
@@ -668,18 +670,23 @@ fn main(@builtin(global_invocation_id) gid: vec3u) {
   let tanf = u.cam_pos_f.w;
 
   var radiance = vec3f(0.0);
+  var radSq = vec3f(0.0);
   for (var s = 0u; s < spp; s = s + 1u) {
     let jitter = vec2f(rand(&rng), rand(&rng)) - vec2f(0.5, 0.5);
     let uv = (vec2f(f32(gid.x), f32(gid.y)) + vec2f(0.5, 0.5) + jitter) / vec2f(f32(W), f32(H));
     let ndc = vec2f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
     let dir = normalize(ndc.x * right * tanf * aspect + ndc.y * up * tanf + fwd);
     // firefly clamp: cap each sample so rare bright specular spikes don't sparkle
-    radiance = radiance + min(trace(u.cam_pos_f.xyz, dir, &rng), vec3f(20.0));
+    let smp = min(trace(u.cam_pos_f.xyz, dir, &rng), vec3f(20.0));
+    radiance = radiance + smp;
+    radSq = radSq + smp * smp;
   }
 
-  let prev = select(accum[idx].rgb, vec3f(0.0), frame == 0u);
+  let prev = select(accum[idx * 2u].rgb, vec3f(0.0), frame == 0u);
   let total = prev + radiance;
-  accum[idx] = vec4f(total, 1.0);
+  accum[idx * 2u] = vec4f(total, 1.0);
+  let prevSq = select(accum[idx * 2u + 1u].rgb, vec3f(0.0), frame == 0u);
+  accum[idx * 2u + 1u] = vec4f(prevSq + radSq, 1.0);
 
   let count = f32(frame + 1u) * f32(spp);
   var c = vec3f(aces_curve(total.r / count), aces_curve(total.g / count), aces_curve(total.b / count));
