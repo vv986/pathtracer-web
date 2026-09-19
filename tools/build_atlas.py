@@ -318,9 +318,9 @@ os.makedirs(OUT, exist_ok=True)
 with open(os.path.join(OUT, 'bistro_tex.json'), 'w') as f:
     json.dump({'pages': len(pages), 'slots': slots}, f)
 for i, p in enumerate(pages):
-    p['img'].save(os.path.join(OUT, f'atlas_{i}.jpg'), quality=90)
-    print(f'atlas_{i}.jpg saved ({os.path.getsize(os.path.join(OUT, f"atlas_{i}.jpg")) // 1024} KB)')
+    p['img'].save(os.path.join(OUT, f'atlas_{i}.webp'), quality=88)
+    print(f'atlas_{i}.webp saved ({os.path.getsize(os.path.join(OUT, f"atlas_{i}.webp")) // 1024} KB)')
 for i, p in enumerate(nrm_pages):
-    p['img'].save(os.path.join(OUT, f'nrm_{i}.jpg'), quality=92)
-    print(f'nrm_{i}.jpg saved')
+    p['img'].save(os.path.join(OUT, f'nrm_{i}.webp'), quality=90)
+    print(f'nrm_{i}.webp saved')
 print(f'DONE: {len(pages)} albedo pages, {len(nrm_pages)} normal pages, {len(placed)}/{len(tex_area)} textures placed')

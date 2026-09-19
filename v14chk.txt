@@ -1,24 +1,27 @@
-// GPU orchestration: pipelines, per-scene buffers, camera, UI, frame loop.
+HTTP/1.1 404 Not Found
+Connection: keep-alive
+Content-Length: 9379
+Server: GitHub.com
+Content-Type: text/html; charset=utf-8
+Access-Control-Allow-Origin: *
+Strict-Transport-Security: max-age=31556952
+ETag: "6aac0af2-24a3"
+Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'self'
+x-proxy-cache: MISS
+X-GitHub-Request-Id: E47C:70626:134894:14830F:6AAE13BD
+x-github-edge-region: japaneast
+Accept-Ranges: bytes
+Date: Sat, 19 Sep 2026 04:47:12 GMT
+Via: 1.1 varnish
+Age: 19
+X-Served-By: cache-nrt-rjtf7700036-NRT
+X-Cache: HIT
+X-Cache-Hits: 1
+X-Timer: S1789793233.977301,VS0,VE1
+Vary: Accept-Encoding
+X-Fastly-Request-ID: e97b11676922583269de49b9ea1a8330dfbb51b0
 
-import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=14';
-import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=14';
-
-const errBox = document.getElementById('err');
-function showErr(msg) {
-  const t = errBox.textContent ? errBox.textContent + '\n' + msg : String(msg);
-  errBox.textContent = t.slice(-4000);
-}
-window.onerror = (m, s, l, c) => { showErr(`JS error: ${m} (${l}:${c})`); };
-
-const SPP_PER_FRAME = 2;
-const MAX_TOTAL_SAMPLES = 4000;
-
-const canvas = document.getElementById('c');
-const hud = document.getElementById('hud');
-
-let device, ctx, format;
-let uniBuf, accumBuf, histBuf, histZero, outTex;
-let primPipeline, meshPipeline, blitPipeline;
+Pipeline, meshPipeline, blitPipeline;
 let fallbackTex, fallbackView;
 let W = 0, H = 0;
 let dummyBuf;
@@ -230,7 +233,6 @@ async function activateScene(name) {
 const uniformScratch = new ArrayBuffer(128);
 
 function tick(t) {
-  if (document.hidden) { requestAnimationFrame(tick); return; }  // never burn GPU in background
   lastTickAt = performance.now();
   const dt = lastT ? (t - lastT) / 1000 : 0;
   lastT = t;
@@ -471,7 +473,7 @@ window.addEventListener('resize', () => { /* handled in tick via desiredSize che
 
 // Watchdog: keep rendering when rAF is throttled (occluded/automation contexts).
 setInterval(() => {
-  if (device && !document.hidden && performance.now() - lastTickAt > 400 && scene) tick(performance.now());
+  if (device && performance.now() - lastTickAt > 400 && scene) tick(performance.now());
 }, 120);
 
 // debug hook (automation/testing): tweak the live camera from the console
