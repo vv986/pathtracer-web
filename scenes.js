@@ -5,7 +5,7 @@
 //   verts4 = xyz + material slot, palette = per-slot {albedo, mtype, rough, ior}.
 // Material types: 0 diffuse, 1 metal (GGX), 2 glass, 3 emissive.
 
-import { parseOBJ, parseGLTF, buildBVHIndexed } from './bvh.js?v=15';
+import { parseOBJ, parseGLTF, buildBVHIndexed } from './bvh.js?v=16';
 
 const SUN_DIR = (() => {
   const l = Math.hypot(-0.45, 0.38, -0.55);
@@ -21,22 +21,15 @@ function norm3(a) {
   return [a[0] / l, a[1] / l, a[2] / l];
 }
 
-// fetch with live download progress in the HUD; transparently prefers .gz
+// fetch with live download progress in the HUD (big models take a while)
 async function fetchBytes(url) {
-  const hud = document.getElementById('hud');
-  let res = await fetch(url + '.gz').catch(() => null);
-  let body = null, total = 0;
-  if (res && res.ok) {
-    body = res.body.pipeThrough(new DecompressionStream('gzip'));
-  } else {
-    res = await fetch(url);
-    if (!res.ok) throw new Error('无法加载 ' + url + ' (' + res.status + ')');
-    body = res.body;
-    total = +res.headers.get('Content-Length') || 0;
-  }
-  const reader = body.getReader();
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('无法加载 ' + url + ' (' + res.status + ')');
+  const total = +res.headers.get('Content-Length') || 0;
+  const reader = res.body.getReader();
   const chunks = [];
   let recv = 0;
+  const hud = document.getElementById('hud');
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -99,29 +92,21 @@ function packMeshScene(mesh, palette) {
   const verts4 = new Float32Array(numVerts * 4);
   // normals MUST be padded to a 16-byte stride too: the shader reads array<vec4f>,
   // and an unpadded 3-float buffer desyncs every vertex past the first third
-  // quantize normals/uv/tangents to packed i16 pairs (halves bandwidth; precision 3e-5)
-  const pack16 = (a, b) => (((a & 0xFFFF) | ((b & 0xFFFF) << 16)) >>> 0);
-  const clampI16 = (v) => Math.max(-32768, Math.min(32767, Math.round(v)));
-  const vnP = new Uint32Array(numVerts * 2);
-  const txP = new Uint32Array(numVerts);
-  const tnP = new Uint32Array(numVerts * 2);
+  const norms4 = new Float32Array(numVerts * 4);
+  const tex4 = new Float32Array(numVerts * 4);
+  const tan4 = new Float32Array(numVerts * 4);
+  if (tans) {
+    tan4.set(tans.subarray(0, numVerts * 4));
+  }
   for (let i = 0; i < numVerts; i++) {
     verts4[i * 4] = positions[i * 3];
     verts4[i * 4 + 1] = positions[i * 3 + 1];
     verts4[i * 4 + 2] = positions[i * 3 + 2];
-    const nx = clampI16(Math.max(-1, Math.min(1, normals[i * 3])) * 32767);
-    const ny = clampI16(Math.max(-1, Math.min(1, normals[i * 3 + 1])) * 32767);
-    const nz = clampI16(Math.max(-1, Math.min(1, normals[i * 3 + 2])) * 32767);
-    vnP[i * 2] = pack16(nx, ny);
-    vnP[i * 2 + 1] = pack16(nz, 0);
-    const uu = tuvs ? tuvs[i * 2] : 0;
-    const vv = tuvs ? tuvs[i * 2 + 1] : 0;
-    txP[i] = pack16(clampI16((uu - Math.floor(uu)) * 32767), clampI16((vv - Math.floor(vv)) * 32767));
-    if (tans && (tans[i * 4] || tans[i * 4 + 1] || tans[i * 4 + 2])) {
-      const tl = Math.hypot(tans[i * 4], tans[i * 4 + 1], tans[i * 4 + 2]) || 1;
-      tnP[i * 2] = pack16(clampI16(tans[i * 4] / tl * 32767), clampI16(tans[i * 4 + 1] / tl * 32767));
-      tnP[i * 2 + 1] = pack16(clampI16(tans[i * 4 + 2] / tl * 32767), clampI16(tans[i * 4 + 3] * 32767));
-    }
+    norms4[i * 4] = normals[i * 3];
+    norms4[i * 4 + 1] = normals[i * 3 + 1];
+    norms4[i * 4 + 2] = normals[i * 3 + 2];
+    tex4[i * 4] = tuvs ? tuvs[i * 2] : 0;
+    tex4[i * 4 + 1] = tuvs ? tuvs[i * 2 + 1] : 0;
   }
   if (mesh.matSlot) {
     for (let i = 0; i < numVerts; i++) verts4[i * 4 + 3] = mesh.matSlot[i];
@@ -132,7 +117,7 @@ function packMeshScene(mesh, palette) {
     palAlb.set([m.albedo[0], m.albedo[1], m.albedo[2], m.mtype], i * 4);
     palPrm.set([m.rough, m.ior, 0, 0], i * 4);
   });
-  return { verts4, vnormP: vnP, texP: txP, tanP: tnP, idx: mesh.idx, nodes: mesh.nodes, numTris: mesh.numTris, palAlb, palPrm };
+  return { verts4, vnorm: norms4, tex4, tan4, idx: mesh.idx, nodes: mesh.nodes, numTris: mesh.numTris, palAlb, palPrm };
 }
 
 // ---------------- Cornell Box ----------------
@@ -338,11 +323,11 @@ async function buildBistro() {
     const bitmaps = [];
     const nrmBitmaps = [];
     for (let i = 0; i < texJson.pages; i++) {
-      const bytes = await fetchBytes('models/atlas_' + i + '.webp');
+      const bytes = await fetchBytes('models/atlas_' + i + '.jpg');
       bitmaps.push(await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
     }
     for (let i = 0; i < (texJson.nrmPages || 0); i++) {
-      const bytes = await fetchBytes('models/nrm_' + i + '.webp');
+      const bytes = await fetchBytes('models/nrm_' + i + '.jpg');
       nrmBitmaps.push(await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }), { premultiplyAlpha: 'none', colorSpaceConversion: 'none' }));
     }
     const M = mesh.mats.length;

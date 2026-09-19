@@ -1,7 +1,7 @@
 // GPU orchestration: pipelines, per-scene buffers, camera, UI, frame loop.
 
-import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=15';
-import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=15';
+import { CORE1, CORE2, MESH_PART, PRIM_STUB, BLIT_WGSL } from './shaders.js?v=16';
+import { SCENE_BUILDERS, BUNNY_MATERIALS } from './scenes.js?v=16';
 
 const errBox = document.getElementById('err');
 function showErr(msg) {
@@ -29,17 +29,6 @@ let cam = null;
 let meshMatName = 'chrome';
 
 let frame = 0, totalSamples = 0;
-let converged = false, nextVarCheck = 600;
-let convergenceEpoch = 0;   // bumps on scene switch; stale async checks are ignored
-async function checkConvergence() {
-  const epoch = convergenceEpoch;
-  try {
-    const st = await window.__dbg.accumStats();
-    if (epoch !== convergenceEpoch) return;   // scene switched mid-check
-    if (st && parseFloat(st.relStd) < 0.035) converged = true;
-  } catch (e) { /* ignore */
-  }
-}
 let lastT = 0, tickCount = 0, fpsTimer = 0, fps = 0;
 let lastTickAt = 0;
 let captureFlag = false;
@@ -107,7 +96,7 @@ function clampCam() {
 function createFrameBuffers(w, h) {
   [W, H] = [w, h];
   canvas.width = W; canvas.height = H;
-  accumBuf = device.createBuffer({ size: W * H * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
+  accumBuf = device.createBuffer({ size: W * H * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
   histBuf = device.createBuffer({ size: W * H * 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
   histZero = new Float32Array(W * H * 4);
   outTex = device.createTexture({ size: [W, H], format: 'rgba16float',
@@ -177,12 +166,12 @@ async function activateScene(name) {
       rt.buffers.quadBuf = dummyBuf;
       rt.buffers.nodeBuf = makeStorageF32(m.nodes);
       rt.buffers.vertBuf = makeStorageF32(m.verts4);
-      rt.buffers.normBuf = makeStorageU32(m.vnormP);
+      rt.buffers.normBuf = makeStorageF32(m.vnorm);
       rt.buffers.idxBuf = makeStorageU32(m.idx);
       rt.buffers.palAlbBuf = makeStorageF32(m.palAlb);
       rt.buffers.palPrmBuf = makeStorageF32(m.palPrm);
-      rt.buffers.texBuf = makeStorageU32(m.texP);
-      rt.buffers.tanBuf = makeStorageU32(m.tanP);
+      rt.buffers.texBuf = makeStorageF32(m.tex4);
+      rt.buffers.tanBuf = makeStorageF32(m.tan4);
       // atlas pages (graceful fallback to flat gray when a model ships without textures)
       rt.buffers.matUVBuf = makeStorageF32(def.atlas ? def.atlas.matUV : new Float32Array(48));
       const views = [];
@@ -218,9 +207,6 @@ async function activateScene(name) {
   device.queue.writeBuffer(histBuf, 0, histZero); // fresh history for a new scene
 
   frame = 0; totalSamples = 0;
-  converged = false;
-  convergenceEpoch++;
-  nextVarCheck = 600;
   dynScale = 1.0; frameMsEma = 16; govCooldown = performance.now() / 1000 + 1.0;
   document.querySelectorAll('#ui button[data-scene]').forEach((b) => {
     b.classList.toggle('active', b.dataset.scene === name);
@@ -290,13 +276,8 @@ function tick(t) {
   f32.set([scene.def.sunDir[0], scene.def.sunDir[1], scene.def.sunDir[2], 0], 20);
   device.queue.writeBuffer(uniBuf, 0, uniformScratch);
 
-  // variance-based early convergence: stop when the mean relative std drops low
-  if (!converged && totalSamples >= 600 && totalSamples % 400 < SPP_PER_FRAME) {
-    checkConvergence();
-  }
-
   const enc = device.createCommandEncoder();
-  if (totalSamples < MAX_TOTAL_SAMPLES && !converged) {
+  if (totalSamples < MAX_TOTAL_SAMPLES) {
     const cp = enc.beginComputePass();
     cp.setPipeline(scene.def.type === 'mesh' ? meshPipeline : primPipeline);
     cp.setBindGroup(0, scene.bindGroup);
@@ -335,11 +316,9 @@ function tick(t) {
     } catch (e) { showErr('截图失败: ' + String(e)); }
   }
 
-  const stat = converged
-    ? `已收敛(方差) · ${totalSamples} spp`
-    : (totalSamples >= MAX_TOTAL_SAMPLES
-        ? `已收敛 · ${totalSamples} spp`
-        : `累积 ${totalSamples} spp · ${fps} fps`);
+  const stat = totalSamples >= MAX_TOTAL_SAMPLES
+    ? `已收敛 · ${totalSamples} spp`
+    : `累积 ${totalSamples} spp · ${fps} fps`;
   hud.textContent = `${scene.def.name} — ${W}×${H} (dyn ${Math.round(dynScale * 100)}% × base ${Math.round((scene.def.resScale ?? 1) * 100)}%) · ${stat}` +
     (scene.def.numTris > 0 ? ` · ${scene.def.numTris.toLocaleString()} tris` : '');
 
@@ -352,16 +331,8 @@ let blitBind = null;
 
 async function init() {
   if (!navigator.gpu) throw new Error('此浏览器不支持 WebGPU,请使用 Chrome / Edge 113+');
-  // retry: right after a GPU crash Chrome may briefly refuse to hand out adapters
-  let adapter = null;
-  for (let i = 0; i < 6; i++) {
-    adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-    if (!adapter) adapter = await navigator.gpu.requestAdapter();
-    if (adapter) break;
-    showErr(`GPU 适配器暂时不可用,${(i + 1) * 2} 秒后重试…`);
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-  if (!adapter) throw new Error('未找到可用 GPU 适配器——请完全退出浏览器(所有窗口)后重开,或重启电脑');
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) throw new Error('未找到可用 GPU 适配器');
   device = await adapter.requestDevice({ requiredLimits: {
     maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
     maxBufferSize: adapter.limits.maxBufferSize,
@@ -597,38 +568,26 @@ window.__dbg = {
     st.destroy();
     return out;
   },
-  // statistics over the accumulation buffer: sampled subset (every 16th pixel) to keep readbacks light
+  // statistics over the accumulation buffer: NaN pixels / near-black pixels
   async accumStats() {
     if (!accumBuf) return null;
-    const stride = 16;   // sample every 16th pixel -> ~64KB readback at 720p
-    const samples = Math.floor((W * H) / stride);
-    const st = device.createBuffer({ size: samples * 32, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
+    const st = device.createBuffer({ size: accumBuf.size, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST });
     const enc = device.createCommandEncoder();
-    for (let k = 0; k < samples; k++) {
-      const srcOff = k * stride * 32;
-      enc.copyBufferToBuffer(accumBuf, srcOff, st, k * 32, 32);
-    }
+    enc.copyBufferToBuffer(accumBuf, 0, st, 0, accumBuf.size);
     device.queue.submit([enc.finish()]);
     await device.queue.onSubmittedWorkDone();
     await st.mapAsync(GPUMapMode.READ);
     const f = new Float32Array(st.getMappedRange());
-    let nan = 0, dark = 0, relSum = 0;
-    const c = Math.max(1, totalSamples);
-    for (let k = 0; k < samples; k++) {
-      const b0 = k * 8;
-      const mr = f[b0] / c, mg = f[b0 + 1] / c, mb = f[b0 + 2] / c;
-      const qr = f[b0 + 4] / c, qg = f[b0 + 5] / c, qb = f[b0 + 6] / c;
-      if (Number.isNaN(mr) || Number.isNaN(mg) || Number.isNaN(mb)) { nan++; continue; }
-      const vr = Math.max(0, qr - mr * mr), vg = Math.max(0, qg - mg * mg), vb = Math.max(0, qb - mb * mb);
-      const lm = 0.2126 * mr + 0.7152 * mg + 0.0722 * mb + 1e-3;
-      const vl = Math.max(0, 0.2126 * vr + 0.7152 * vg + 0.0722 * vb);
-      relSum += Math.min(Math.sqrt(vl) / lm, 2);
-      if (mr * mr + mg * mg + mb * mb < 1e-6) dark++;
+    let nan = 0, dark = 0;
+    const total = W * H;
+    for (let i = 0; i < total; i++) {
+      const r = f[i * 4], g = f[i * 4 + 1], b = f[i * 4 + 2];
+      if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) nan++;
+      else if (r * r + g * g + b * b < 1e-6) dark++;
     }
     st.unmap();
     st.destroy();
-    return { samples, nanFrac: (nan / samples).toFixed(3), darkFrac: (dark / samples).toFixed(3),
-             relStd: (relSum / samples).toFixed(4) };
+    return { total, nanFrac: (nan / total).toFixed(3), darkFrac: (dark / total).toFixed(3) };
   },
   // statistics over the mesh normal buffer: NaN / near-zero normals
   async vnormStats() {
