@@ -30,11 +30,15 @@ let meshMatName = 'chrome';
 
 let frame = 0, totalSamples = 0;
 let converged = false, nextVarCheck = 600;
+let convergenceEpoch = 0;   // bumps on scene switch; stale async checks are ignored
 async function checkConvergence() {
+  const epoch = convergenceEpoch;
   try {
     const st = await window.__dbg.accumStats();
+    if (epoch !== convergenceEpoch) return;   // scene switched mid-check
     if (st && parseFloat(st.relStd) < 0.035) converged = true;
-  } catch (e) { /* ignore */ }
+  } catch (e) { /* ignore */
+  }
 }
 let lastT = 0, tickCount = 0, fpsTimer = 0, fps = 0;
 let lastTickAt = 0;
@@ -214,6 +218,9 @@ async function activateScene(name) {
   device.queue.writeBuffer(histBuf, 0, histZero); // fresh history for a new scene
 
   frame = 0; totalSamples = 0;
+  converged = false;
+  convergenceEpoch++;
+  nextVarCheck = 600;
   dynScale = 1.0; frameMsEma = 16; govCooldown = performance.now() / 1000 + 1.0;
   document.querySelectorAll('#ui button[data-scene]').forEach((b) => {
     b.classList.toggle('active', b.dataset.scene === name);
